@@ -34,3 +34,4 @@
 | `005-RKNN工具链与YOLO11迁移当前阻塞.md` | 需要继续 YOLO11 ONNX 转 RKNN、板端 NPU 迁移时 | RKNN、rk3576、rknn-toolkit2、rknn_work、WSL、torch |
 | `006-YOLO11_RKNN已在RK3576_NPU单帧识别跑通.md` | 需要确认 RKNN 转换结果、板端 C++ demo 部署目录、NPU 单帧识别命令和输出图时 | YOLO11、RKNN、NPU、rknn_yolo11_demo、camera.jpg、bus.jpg |
 | `007-电脑端实时显示RK3576_NPU_YOLO识别画面.md` | 需要运行实时 NPU YOLO 摄像头预览、确认协议和脚本命令时 | rknn_yolo11_camera_stream、adb_imx415_rknn_live_view.py、RYL1、实时显示 |
+| `008-YOLO11_pose_RKNN已部署但IMX415_MIPI链路当前阻塞.md` | 需要运行 YOLO11-pose 姿态骨骼识别、确认 RKNN 模型和当前相机链路阻塞时 | YOLO11-pose、RYP1、rknn_yolo11_pose_camera_stream、MIPI_CSI2、video42 |

@@ -48,7 +48,7 @@
 
 ## IMX415 实时预览与识别
 
-当前已验证 IMX415 在板端通过 `/dev/video42` 输出 ISP 处理后的 `NV12` 画面，可用 ADB 拉流到电脑端预览或运行 YOLO ONNX 物品识别。
+IMX415 在板端通过 `/dev/video42` 输出 ISP 处理后的 `NV12` 画面时，可用 ADB 拉流到电脑端预览或运行 YOLO ONNX 物品识别。
 
 纯实时预览：
 
@@ -101,3 +101,26 @@ F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --frames 3 --headles
 ```
 
 窗口中按 `q` 或 `Esc` 退出。默认参数为 `960x540 @ 8fps`、ADB 设备号 `2e2609c37dc21c0a`。
+
+## RK3576 NPU 实时 YOLO11 姿态骨骼识别
+
+当前已转换并部署 YOLO11n-pose RKNN 模型与板端姿态流程序：
+
+```text
+/userdata/rknn_yolo11_demo/rknn_yolo11_pose_camera_stream
+/userdata/rknn_yolo11_demo/model/yolo11n_pose_rk3576_fp.rknn
+```
+
+电脑端实时显示姿态骨骼：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --mode pose
+```
+
+无窗口冒烟测试：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --mode pose --frames 3 --headless --save-snapshot .\captures\rknn_pose_live_smoke.jpg
+```
+
+姿态模式默认参数为 `640x360 @ 5fps`，以降低 RK3576 NPU 姿态后处理和 ADB 回传压力；检测模式仍默认 `960x540 @ 8fps`。如果 `/dev/video42` 单帧采集都超时，并且 `dmesg` 反复出现 `MIPI_CSI2 ERR2:0x10000000`，应先检查 IMX415 排线、接口接触和摄像头供电，再复测上述命令。
