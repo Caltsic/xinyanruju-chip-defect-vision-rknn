@@ -1,0 +1,47 @@
+# Local vendor documents and SDK dumps
+/立创·泰山派3开发板资料/
+
+# RKNN working tree: keep only the curated board-side source package.
+/rknn_work/*
+!/rknn_work/board_yolo11_src/
+!/rknn_work/board_yolo11_src/**
+
+# Generated RKNN workspace artifacts
+/rknn_work/board_yolo11_src.tar.gz
+/rknn_work/models/
+/rknn_work/venv/
+/rknn_work/rknn-toolkit2/
+/rknn_work/rknn_model_zoo/
+
+# Python/cache/build outputs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Generic archives and large model source formats
+*.rar
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+*.onnx
+*.pt
+*.pth
+*.pb
+
+# Local secrets and machine-specific config
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+id_*
+credentials*
+secret*
+
