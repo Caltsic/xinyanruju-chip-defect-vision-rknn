@@ -162,8 +162,8 @@ int inference_yolo11_model(rknn_app_context_t *app_ctx, image_buffer_t *img, obj
     letterbox_t letter_box;
     rknn_input inputs[app_ctx->io_num.n_input];
     rknn_output outputs[app_ctx->io_num.n_output];
-    const float nms_threshold = NMS_THRESH;      // 默认的NMS阈值
-    const float box_conf_threshold = BOX_THRESH; // 默认的置信度阈值
+    const float nms_threshold = app_ctx->nms_threshold > 0 ? app_ctx->nms_threshold : NMS_THRESH;
+    const float box_conf_threshold = app_ctx->box_conf_threshold > 0 ? app_ctx->box_conf_threshold : BOX_THRESH;
     int bg_color = 114;
 
     if ((!app_ctx) || !(img) || (!od_results))

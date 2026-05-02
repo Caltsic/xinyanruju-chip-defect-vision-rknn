@@ -47,6 +47,8 @@ typedef struct {
     int model_width;
     int model_height;
     bool is_quant;
+    float box_conf_threshold;
+    float nms_threshold;
 } rknn_app_context_t;
 
 #include "postprocess.h"

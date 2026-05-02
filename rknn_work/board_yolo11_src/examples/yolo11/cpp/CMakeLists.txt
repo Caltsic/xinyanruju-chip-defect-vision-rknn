@@ -90,6 +90,41 @@ target_include_directories(rknn_yolo11_camera_stream PRIVATE
     ${LIBRKNNRT_INCLUDES}
 )
 
+add_executable(rknn_chip_defect_camera_stream
+    live_camera_yolo.cc
+    postprocess.cc
+    ${rknpu_yolo11_file}
+)
+
+target_compile_definitions(rknn_chip_defect_camera_stream PRIVATE
+    OBJ_CLASS_NUM=4
+    "DEFAULT_MODEL_PATH=\"model/chipcheck_yolov8_detect_int8.rknn\""
+    "YOLO_LABEL_TXT_PATH=\"./model/chip_defect_labels.txt\""
+    "LIVE_APP_NAME=\"RKNN chip defect\""
+)
+
+target_link_libraries(rknn_chip_defect_camera_stream
+    imageutils
+    fileutils
+    ${LIBRKNNRT}
+    dl
+)
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    target_link_libraries(rknn_chip_defect_camera_stream
+    log
+)
+endif()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(rknn_chip_defect_camera_stream Threads::Threads)
+endif()
+
+target_include_directories(rknn_chip_defect_camera_stream PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LIBRKNNRT_INCLUDES}
+)
+
 
 # Currently zero copy only supports rknpu2, v1103/rv1103b/rv1106 supports zero copy by default
 if (NOT (TARGET_SOC STREQUAL "rv1106" OR TARGET_SOC STREQUAL "rv1103" OR TARGET_SOC STREQUAL "rk1808" 
@@ -131,7 +166,11 @@ endif()
 
 install(TARGETS ${PROJECT_NAME} DESTINATION .)
 install(TARGETS rknn_yolo11_camera_stream DESTINATION .)
+install(TARGETS rknn_chip_defect_camera_stream DESTINATION .)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../model/bus.jpg DESTINATION model)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../model/coco_80_labels_list.txt DESTINATION model)
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../model/chip_defect_labels.txt)
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../model/chip_defect_labels.txt DESTINATION model)
+endif()
 file(GLOB RKNN_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/*.rknn")
 install(FILES ${RKNN_FILES} DESTINATION model)

@@ -34,3 +34,5 @@
 | `005-RKNN工具链与YOLO11迁移当前阻塞.md` | 需要继续 YOLO11 ONNX 转 RKNN、板端 NPU 迁移时 | RKNN、rk3576、rknn-toolkit2、rknn_work、WSL、torch |
 | `006-YOLO11_RKNN已在RK3576_NPU单帧识别跑通.md` | 需要确认 RKNN 转换结果、板端 C++ demo 部署目录、NPU 单帧识别命令和输出图时 | YOLO11、RKNN、NPU、rknn_yolo11_demo、camera.jpg、bus.jpg |
 | `007-电脑端实时显示RK3576_NPU_YOLO识别画面.md` | 需要运行实时 NPU YOLO 摄像头预览、确认协议和脚本命令时 | rknn_yolo11_camera_stream、adb_imx415_rknn_live_view.py、RYL1、实时显示 |
+| `008-芯片缺陷YOLOv8_RKNN云训练包.md` | 需要训练半导体芯片缺陷检测模型、生成 ONNX/RKNN FP/INT8、确认云端包结构和板端适配风险时 | YOLOv8、chip defect、polygon转bbox、INT8、RK3576、cloud_training |
+| `009-YOLOv8芯片缺陷RKNN板端实时流已适配.md` | 需要运行芯片缺陷 RKNN 实时检测、确认 YOLOv8 单输出后处理、板端部署文件和电脑端显示命令时 | YOLOv8、chip defect、rknn_chip_defect_camera_stream、1x8x8400、INT8、FP、adb_imx415_rknn_live_view.py |

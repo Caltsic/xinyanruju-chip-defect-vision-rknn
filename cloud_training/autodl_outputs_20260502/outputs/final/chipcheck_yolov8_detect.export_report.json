@@ -1,0 +1,8 @@
+{
+  "weights": "/root/autodl-tmp/chipcheck_yolov8_rknn/outputs/final/chipcheck_yolov8_detect.pt",
+  "output": "/root/autodl-tmp/chipcheck_yolov8_rknn/outputs/final/chipcheck_yolov8_detect.onnx",
+  "imgsz": 640,
+  "opset": 12,
+  "exporter": "rockchip_ultralytics_yolov8",
+  "source_onnx": "/root/autodl-tmp/chipcheck_yolov8_rknn/outputs/final/chipcheck_yolov8_detect.onnx"
+}

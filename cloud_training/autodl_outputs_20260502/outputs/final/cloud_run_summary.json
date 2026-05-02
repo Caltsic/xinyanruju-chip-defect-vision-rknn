@@ -1,0 +1,32 @@
+{
+  "created_at": "2026-05-02 23:09:55 CST",
+  "remote_root": "/root/autodl-tmp/chipcheck_yolov8_rknn",
+  "target_platform": "rk3576",
+  "final_artifacts": [
+    "calib_dataset.txt",
+    "chip_defect_labels.txt",
+    "chipcheck_yolov8_detect.export_report.json",
+    "chipcheck_yolov8_detect.onnx",
+    "chipcheck_yolov8_detect.pt",
+    "chipcheck_yolov8_detect_fp.rknn",
+    "chipcheck_yolov8_detect_int8.rknn",
+    "dataset_report.json"
+  ],
+  "metrics": {
+    "epochs_recorded": 121,
+    "last_epoch": 122,
+    "last": {
+      "metrics/precision(B)": "                0.91012",
+      "metrics/recall(B)": "                0.76707",
+      "metrics/mAP50(B)": "                0.86669",
+      "metrics/mAP50-95(B)": "                0.67171"
+    },
+    "best_by_mAP50_95": {
+      "epoch_1_based": 97,
+      "precision": "                0.97783",
+      "recall": "                0.98486",
+      "mAP50": "                 0.9891",
+      "mAP50-95": "                0.79166"
+    }
+  }
+}

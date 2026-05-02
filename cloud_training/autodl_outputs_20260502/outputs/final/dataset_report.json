@@ -1,0 +1,58 @@
+{
+  "source": "/root/autodl-tmp/chipcheck_yolov8_rknn/dataset_raw/chip_defect_raw",
+  "output": "/root/autodl-tmp/chipcheck_yolov8_rknn/outputs/dataset_yolov8_det",
+  "image_mode": "hardlink",
+  "class_names": [
+    "ZF-scratch",
+    "scratch",
+    "broken",
+    "pinbreak"
+  ],
+  "splits": {
+    "train": {
+      "images": 2138,
+      "labels": 2138,
+      "objects": 4771,
+      "bbox_objects": 2382,
+      "polygon_objects": 2389,
+      "empty_label_files": 2,
+      "class_counts": {
+        "2": 537,
+        "0": 1601,
+        "1": 1593,
+        "3": 1040
+      }
+    },
+    "valid": {
+      "images": 133,
+      "labels": 133,
+      "objects": 290,
+      "bbox_objects": 0,
+      "polygon_objects": 290,
+      "empty_label_files": 0,
+      "class_counts": {
+        "2": 25,
+        "0": 77,
+        "1": 120,
+        "3": 68
+      }
+    },
+    "test": {
+      "images": 135,
+      "labels": 135,
+      "objects": 288,
+      "bbox_objects": 0,
+      "polygon_objects": 288,
+      "empty_label_files": 0,
+      "class_counts": {
+        "2": 34,
+        "0": 98,
+        "1": 101,
+        "3": 55
+      }
+    }
+  },
+  "calib_dataset": "/root/autodl-tmp/chipcheck_yolov8_rknn/outputs/calib_dataset.txt",
+  "labels": "/root/autodl-tmp/chipcheck_yolov8_rknn/outputs/chip_defect_labels.txt",
+  "data_yaml": "/root/autodl-tmp/chipcheck_yolov8_rknn/outputs/dataset_yolov8_det/data.yaml"
+}

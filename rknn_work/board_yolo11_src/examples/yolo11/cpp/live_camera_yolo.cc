@@ -1,6 +1,6 @@
 // Copyright (c) 2026.
 //
-// Live V4L2 NV12 camera stream for RKNN YOLO11.
+// Live V4L2 NV12 camera stream for RKNN YOLO-family models.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -28,7 +28,15 @@ namespace {
 static_assert(sizeof(uint32_t) == 4, "protocol requires 32-bit uint32_t");
 static_assert(sizeof(float) == 4, "protocol requires 32-bit float");
 
-const char kDefaultModel[] = "model/yolo11n_rk3576.rknn";
+#ifndef DEFAULT_MODEL_PATH
+#define DEFAULT_MODEL_PATH "model/yolo11n_rk3576.rknn"
+#endif
+
+#ifndef LIVE_APP_NAME
+#define LIVE_APP_NAME "RKNN YOLO"
+#endif
+
+const char kDefaultModel[] = DEFAULT_MODEL_PATH;
 const char kDefaultDevice[] = "/dev/video42";
 const uint32_t kDefaultWidth = 960;
 const uint32_t kDefaultHeight = 540;
@@ -36,6 +44,8 @@ const uint32_t kDefaultFps = 8;
 const uint32_t kDefaultFrames = 0;
 const uint32_t kDefaultSkip = 8;
 const uint32_t kDefaultBuffers = 4;
+const float kDefaultConfThreshold = BOX_THRESH;
+const float kDefaultNmsThreshold = NMS_THRESH;
 const uint32_t kMaxPayloadSize = std::numeric_limits<uint32_t>::max();
 const char kProtocolMagic[] = "RYL1";
 
@@ -48,6 +58,8 @@ struct Options {
     uint32_t frames;
     uint32_t skip;
     uint32_t buffers;
+    float conf_threshold;
+    float nms_threshold;
 
     Options()
         : model(kDefaultModel),
@@ -57,7 +69,9 @@ struct Options {
           fps(kDefaultFps),
           frames(kDefaultFrames),
           skip(kDefaultSkip),
-          buffers(kDefaultBuffers) {}
+          buffers(kDefaultBuffers),
+          conf_threshold(kDefaultConfThreshold),
+          nms_threshold(kDefaultNmsThreshold) {}
 };
 
 struct MappedPlane {
@@ -108,11 +122,12 @@ static void print_usage(const char *prog)
 {
     fprintf(stderr,
             "Usage: %s [--model PATH] [--device NODE] [--width N] [--height N] "
-            "[--fps N] [--frames N] [--skip N] [--buffers N]\n"
+            "[--fps N] [--frames N] [--skip N] [--buffers N] [--conf F] [--nms F]\n"
             "Defaults: --model %s --device %s --width %u --height %u "
-            "--fps %u --frames %u --skip %u --buffers %u\n",
+            "--fps %u --frames %u --skip %u --buffers %u --conf %.3f --nms %.3f\n",
             prog, kDefaultModel, kDefaultDevice, kDefaultWidth, kDefaultHeight,
-            kDefaultFps, kDefaultFrames, kDefaultSkip, kDefaultBuffers);
+            kDefaultFps, kDefaultFrames, kDefaultSkip, kDefaultBuffers,
+            kDefaultConfThreshold, kDefaultNmsThreshold);
 }
 
 static bool parse_u32(const char *text, uint32_t *value)
@@ -130,6 +145,23 @@ static bool parse_u32(const char *text, uint32_t *value)
     }
 
     *value = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+static bool parse_float_threshold(const char *text, float *value)
+{
+    if (text == NULL || text[0] == '\0') {
+        return false;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    float parsed = strtof(text, &end);
+    if (errno != 0 || end == text || *end != '\0' || parsed <= 0.0f || parsed >= 1.0f) {
+        return false;
+    }
+
+    *value = parsed;
     return true;
 }
 
@@ -168,6 +200,20 @@ static bool parse_numeric_option(int argc, char **argv, int *index, const char *
     }
     if (!parse_u32(text.c_str(), value)) {
         fprintf(stderr, "invalid value for %s: %s\n", name, text.c_str());
+        return false;
+    }
+    return true;
+}
+
+static bool parse_float_option(int argc, char **argv, int *index, const char *name, float *value)
+{
+    std::string text;
+    if (!take_option_value(argc, argv, index, name, &text)) {
+        return false;
+    }
+    if (!parse_float_threshold(text.c_str(), value)) {
+        fprintf(stderr, "invalid value for %s: %s; expected 0.0 < value < 1.0\n",
+                name, text.c_str());
         return false;
     }
     return true;
@@ -212,6 +258,14 @@ static bool parse_args(int argc, char **argv, Options *opts)
             }
         } else if (arg == "--buffers" || arg.compare(0, 10, "--buffers=") == 0) {
             if (!parse_numeric_option(argc, argv, &i, "--buffers", &opts->buffers)) {
+                return false;
+            }
+        } else if (arg == "--conf" || arg.compare(0, 7, "--conf=") == 0) {
+            if (!parse_float_option(argc, argv, &i, "--conf", &opts->conf_threshold)) {
+                return false;
+            }
+        } else if (arg == "--nms" || arg.compare(0, 6, "--nms=") == 0) {
+            if (!parse_float_option(argc, argv, &i, "--nms", &opts->nms_threshold)) {
                 return false;
             }
         } else {
@@ -725,6 +779,8 @@ int main(int argc, char **argv)
         exit_code = 1;
         goto out;
     }
+    rknn_app_ctx.box_conf_threshold = opts.conf_threshold;
+    rknn_app_ctx.nms_threshold = opts.nms_threshold;
 
     if (!open_camera(opts, &camera)) {
         exit_code = 1;
@@ -736,8 +792,10 @@ int main(int argc, char **argv)
     }
     camera_started = true;
 
-    fprintf(stderr, "streaming RKNN YOLO11 packets to stdout: frames=%u skip=%u payload=%zu\n",
-            opts.frames, opts.skip, frame_size);
+    fprintf(stderr,
+            "streaming %s packets to stdout: frames=%u skip=%u payload=%zu conf=%.3f nms=%.3f\n",
+            LIVE_APP_NAME, opts.frames, opts.skip, frame_size,
+            opts.conf_threshold, opts.nms_threshold);
 
     while (opts.frames == 0 || emitted < opts.frames) {
         struct v4l2_buffer buf;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live-view RKNN YOLO11 IMX415 detections streamed from TaishanPi over ADB."""
+"""Live-view RKNN detections streamed from TaishanPi IMX415 over ADB."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import sys
 import time
 from collections import deque
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterable
 
 try:
@@ -31,9 +31,12 @@ MAGIC = b"RYL1"
 HEADER_STRUCT = struct.Struct("<4sIIIII")
 BOX_STRUCT = struct.Struct("<Ifffff")
 
-REMOTE_WORKDIR = "/userdata/rknn_yolo11_demo"
-REMOTE_BINARY = "./rknn_yolo11_camera_stream"
-REMOTE_MODEL = "model/yolo11n_rk3576.rknn"
+YOLO11_REMOTE_WORKDIR = "/userdata/rknn_yolo11_demo"
+YOLO11_REMOTE_BINARY = "./rknn_yolo11_camera_stream"
+YOLO11_REMOTE_MODEL = "model/yolo11n_rk3576.rknn"
+CHIP_REMOTE_WORKDIR = "/userdata/rknn_yolo11_demo"
+CHIP_REMOTE_BINARY = "./rknn_chip_defect_camera_stream"
+CHIP_REMOTE_MODEL = "model/chipcheck_yolov8_detect_int8.rknn"
 REMOTE_DEVICE = "/dev/video42"
 DEFAULT_REMOTE_LOG = "/tmp/rknn_yolo11_camera_stream.log"
 
@@ -42,6 +45,9 @@ DEFAULT_WIDTH = 960
 DEFAULT_HEIGHT = 540
 DEFAULT_FPS = 8
 DEFAULT_SKIP = 8
+DEFAULT_CONF = 0.25
+DEFAULT_NMS = 0.45
+DEFAULT_PROFILE = "chip-defect"
 
 MAX_DETECTIONS = 1024
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024
@@ -127,6 +133,13 @@ COCO_CLASSES = [
     "teddy bear",
     "hair drier",
     "toothbrush",
+]
+
+CHIP_DEFECT_CLASSES = [
+    "ZF-scratch",
+    "scratch",
+    "broken",
+    "pinbreak",
 ]
 
 BOX_COLORS = [
@@ -229,9 +242,9 @@ def adb_base_cmd(args: argparse.Namespace) -> list[str]:
 
 def build_remote_command(args: argparse.Namespace) -> str:
     stream_parts = [
-        REMOTE_BINARY,
+        args.remote_binary,
         "--model",
-        REMOTE_MODEL,
+        args.remote_model,
         "--device",
         REMOTE_DEVICE,
         "--width",
@@ -244,10 +257,14 @@ def build_remote_command(args: argparse.Namespace) -> str:
         args.skip,
         "--frames",
         args.frames,
+        "--conf",
+        args.conf,
+        "--nms",
+        args.nms,
     ]
     stream_command = shell_join(stream_parts)
     return (
-        f"cd {shlex.quote(REMOTE_WORKDIR)} && "
+        f"cd {shlex.quote(args.remote_workdir)} && "
         "export LD_LIBRARY_PATH=$PWD/lib:$LD_LIBRARY_PATH && "
         f"exec {stream_command} 2>{shlex.quote(args.remote_log)}"
     )
@@ -266,7 +283,9 @@ def start_adb_stream(args: argparse.Namespace) -> subprocess.Popen[bytes]:
 
 def cleanup_remote_stream(args: argparse.Namespace) -> None:
     command = adb_base_cmd(args)
-    command.extend(["shell", "pkill -f rknn_yolo11_camera_stream 2>/dev/null || true"])
+    binary_name = PurePosixPath(args.remote_binary).name
+    cleanup = f"pkill -f {shlex.quote(binary_name)} 2>/dev/null || true"
+    command.extend(["shell", cleanup])
     try:
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3, check=False)
     except Exception:
@@ -397,9 +416,9 @@ def normalized_box(detection: Detection, width: int, height: int) -> Detection |
     return Detection(detection.class_id, x1, y1, x2, y2, detection.score)
 
 
-def class_name(class_id: int) -> str:
-    if 0 <= class_id < len(COCO_CLASSES):
-        return COCO_CLASSES[class_id]
+def class_name(class_id: int, class_names: list[str]) -> str:
+    if 0 <= class_id < len(class_names):
+        return class_names[class_id]
     return str(class_id)
 
 
@@ -437,7 +456,7 @@ def put_label(
     )
 
 
-def draw_detections(image: np.ndarray, detections: list[Detection]) -> int:
+def draw_detections(image: np.ndarray, detections: list[Detection], class_names: list[str]) -> int:
     height, width = image.shape[:2]
     drawn = 0
     for raw_detection in detections:
@@ -452,7 +471,7 @@ def draw_detections(image: np.ndarray, detections: list[Detection]) -> int:
         y2 = int(round(detection.y2))
         score = detection.score
         score_text = f"{score:.2f}" if score <= 1.0 else f"{score:.1f}"
-        label = f"{class_name(detection.class_id)} {score_text}"
+        label = f"{class_name(detection.class_id, class_names)} {score_text}"
 
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
         put_label(image, label, x1, y1, color)
@@ -460,8 +479,16 @@ def draw_detections(image: np.ndarray, detections: list[Detection]) -> int:
     return drawn
 
 
-def draw_status(image: np.ndarray, fps: float, frame_info: StreamFrame, drawn_count: int) -> None:
-    text = f"FPS {fps:.1f} | {frame_info.width}x{frame_info.height} | det {drawn_count} | frame {frame_info.frame_index}"
+def focus_score(image: np.ndarray) -> float:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def draw_status(image: np.ndarray, fps: float, frame_info: StreamFrame, drawn_count: int, focus: float) -> None:
+    text = (
+        f"FPS {fps:.1f} | focus {focus:.0f} | "
+        f"{frame_info.width}x{frame_info.height} | det {drawn_count} | frame {frame_info.frame_index}"
+    )
     text_size, baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
     text_w, text_h = text_size
     cv2.rectangle(image, (8, 8), (text_w + 24, text_h + baseline + 20), (0, 0, 0), -1)
@@ -497,33 +524,96 @@ def nonnegative_int(value: str) -> int:
     return parsed
 
 
+def threshold_float(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 < parsed < 1.0:
+        raise argparse.ArgumentTypeError("must be between 0 and 1")
+    return parsed
+
+
+def profile_defaults(profile: str) -> tuple[str, str, str, list[str], str]:
+    if profile == "yolo11":
+        return (
+            YOLO11_REMOTE_WORKDIR,
+            YOLO11_REMOTE_BINARY,
+            YOLO11_REMOTE_MODEL,
+            COCO_CLASSES,
+            "RKNN YOLO11 IMX415 Live",
+        )
+    return (
+        CHIP_REMOTE_WORKDIR,
+        CHIP_REMOTE_BINARY,
+        CHIP_REMOTE_MODEL,
+        CHIP_DEFECT_CLASSES,
+        "RKNN Chip Defect IMX415 Live",
+    )
+
+
+def load_class_names(args: argparse.Namespace) -> list[str]:
+    if args.labels:
+        labels = [
+            line.strip()
+            for line in args.labels.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if labels:
+            return labels
+
+    return list(args.default_class_names)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--adb", default=default_adb_path(), help="Path to adb.exe")
     parser.add_argument("--serial", default=DEFAULT_SERIAL, help="ADB serial; pass an empty string to omit -s")
+    parser.add_argument(
+        "--profile",
+        choices=("chip-defect", "yolo11"),
+        default=DEFAULT_PROFILE,
+        help="Remote binary/model/label preset",
+    )
+    parser.add_argument("--remote-workdir", help="Board working directory")
+    parser.add_argument("--remote-binary", help="Board stream binary path relative to remote workdir")
+    parser.add_argument("--remote-model", help="Board RKNN model path relative to remote workdir")
+    parser.add_argument("--labels", type=Path, help="Local label file for drawing class names")
     parser.add_argument("--width", type=positive_int, default=DEFAULT_WIDTH, help="Board camera stream width")
     parser.add_argument("--height", type=positive_int, default=DEFAULT_HEIGHT, help="Board camera stream height")
     parser.add_argument("--fps", type=positive_int, default=DEFAULT_FPS, help="Board stream FPS request")
     parser.add_argument("--frames", type=nonnegative_int, default=0, help="Frame count; 0 means run until stopped")
     parser.add_argument("--skip", type=nonnegative_int, default=DEFAULT_SKIP, help="Initial frames skipped by board")
+    parser.add_argument("--conf", type=threshold_float, default=DEFAULT_CONF, help="Board detection confidence threshold")
+    parser.add_argument("--nms", type=threshold_float, default=DEFAULT_NMS, help="Board NMS IoU threshold")
     parser.add_argument("--headless", action="store_true", help="Do not open an OpenCV window")
     parser.add_argument("--save-snapshot", type=Path, help="Save the last annotated frame")
-    parser.add_argument("--window-name", default="RKNN YOLO11 IMX415 Live", help="OpenCV window title")
+    parser.add_argument("--window-name", help="OpenCV window title")
     parser.add_argument("--remote-log", default=DEFAULT_REMOTE_LOG, help="Board-side stderr log path")
     args = parser.parse_args()
+
+    default_workdir, default_binary, default_model, default_labels, default_window = profile_defaults(args.profile)
+    args.remote_workdir = args.remote_workdir or default_workdir
+    args.remote_binary = args.remote_binary or default_binary
+    args.remote_model = args.remote_model or default_model
+    args.default_class_names = default_labels
+    args.window_name = args.window_name or default_window
 
     if args.width % 2 != 0 or args.height % 2 != 0:
         parser.error("NV12 width and height must be even")
     return args
 
 
-def print_headless_status(frame_info: StreamFrame, fps: float, drawn_count: int, last_print: float) -> float:
+def print_headless_status(
+    frame_info: StreamFrame,
+    fps: float,
+    drawn_count: int,
+    focus: float,
+    last_print: float,
+) -> float:
     now = time.perf_counter()
     if now - last_print < 1.0:
         return last_print
     print(
         f"frame={frame_info.frame_index} fps={fps:.1f} "
-        f"size={frame_info.width}x{frame_info.height} det={drawn_count}",
+        f"focus={focus:.0f} size={frame_info.width}x{frame_info.height} det={drawn_count}",
         file=sys.stderr,
     )
     return now
@@ -536,6 +626,7 @@ def main() -> int:
         return 2
 
     args = parse_args()
+    class_names = load_class_names(args)
     process: subprocess.Popen[bytes] | None = None
     process_started = False
     last_frame: np.ndarray | None = None
@@ -559,13 +650,20 @@ def main() -> int:
 
             frame = nv12_to_bgr(frame_info.payload, frame_info.width, frame_info.height)
             fps = fps_meter.tick()
-            drawn_count = draw_detections(frame, frame_info.detections)
-            draw_status(frame, fps, frame_info, drawn_count)
+            focus = focus_score(frame)
+            drawn_count = draw_detections(frame, frame_info.detections, class_names)
+            draw_status(frame, fps, frame_info, drawn_count, focus)
             last_frame = frame
             frames_seen += 1
 
             if args.headless:
-                last_headless_print = print_headless_status(frame_info, fps, drawn_count, last_headless_print)
+                last_headless_print = print_headless_status(
+                    frame_info,
+                    fps,
+                    drawn_count,
+                    focus,
+                    last_headless_print,
+                )
             else:
                 cv2.imshow(args.window_name, frame)
                 key = cv2.waitKey(1) & 0xFF

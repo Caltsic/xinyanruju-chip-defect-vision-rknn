@@ -23,7 +23,11 @@
 
 #include <set>
 #include <vector>
-#define LABEL_NALE_TXT_PATH "./model/coco_80_labels_list.txt"
+#ifndef YOLO_LABEL_TXT_PATH
+#define YOLO_LABEL_TXT_PATH "./model/coco_80_labels_list.txt"
+#endif
+
+#define LABEL_NALE_TXT_PATH YOLO_LABEL_TXT_PATH
 
 static char *labels[OBJ_CLASS_NUM];
 
@@ -503,6 +507,79 @@ static int process_i8_rv1106(int8_t *box_tensor, int32_t box_zp, float box_scale
 }
 #endif
 
+static int yolov8_output_offset(int channel, int anchor, int channels, int anchors, bool channel_first)
+{
+    return channel_first ? channel * anchors + anchor : anchor * channels + channel;
+}
+
+static float yolov8_tensor_value(float *tensor, int offset, int32_t zp, float scale)
+{
+    (void)zp;
+    (void)scale;
+    return tensor[offset];
+}
+
+static float yolov8_tensor_value(int8_t *tensor, int offset, int32_t zp, float scale)
+{
+    return deqnt_affine_to_f32(tensor[offset], zp, scale);
+}
+
+static float yolov8_tensor_value(uint8_t *tensor, int offset, int32_t zp, float scale)
+{
+    return deqnt_affine_u8_to_f32(tensor[offset], zp, scale);
+}
+
+template <typename T>
+static int process_yolov8_one_output(T *tensor, int32_t zp, float scale,
+                                     int channels, int anchors, bool channel_first,
+                                     std::vector<float> &boxes,
+                                     std::vector<float> &objProbs,
+                                     std::vector<int> &classId,
+                                     float threshold)
+{
+    int validCount = 0;
+    for (int anchor = 0; anchor < anchors; ++anchor)
+    {
+        int max_class_id = -1;
+        float max_score = 0.0f;
+        for (int c = 0; c < OBJ_CLASS_NUM; ++c)
+        {
+            int offset = yolov8_output_offset(4 + c, anchor, channels, anchors, channel_first);
+            float score = yolov8_tensor_value(tensor, offset, zp, scale);
+            if (score > max_score)
+            {
+                max_score = score;
+                max_class_id = c;
+            }
+        }
+
+        if (max_class_id < 0 || max_score <= threshold)
+        {
+            continue;
+        }
+
+        float cx = yolov8_tensor_value(tensor, yolov8_output_offset(0, anchor, channels, anchors, channel_first), zp, scale);
+        float cy = yolov8_tensor_value(tensor, yolov8_output_offset(1, anchor, channels, anchors, channel_first), zp, scale);
+        float w = yolov8_tensor_value(tensor, yolov8_output_offset(2, anchor, channels, anchors, channel_first), zp, scale);
+        float h = yolov8_tensor_value(tensor, yolov8_output_offset(3, anchor, channels, anchors, channel_first), zp, scale);
+        if (!isfinite(cx) || !isfinite(cy) || !isfinite(w) || !isfinite(h) || w <= 0.0f || h <= 0.0f)
+        {
+            continue;
+        }
+
+        float x1 = cx - w * 0.5f;
+        float y1 = cy - h * 0.5f;
+        boxes.push_back(x1);
+        boxes.push_back(y1);
+        boxes.push_back(w);
+        boxes.push_back(h);
+        objProbs.push_back(max_score > 1.0f ? 1.0f : max_score);
+        classId.push_back(max_class_id);
+        validCount++;
+    }
+    return validCount;
+}
+
 int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter_box, float conf_threshold, float nms_threshold, object_detect_result_list *od_results)
 {
 #if defined(RV1106_1103) 
@@ -522,6 +599,59 @@ int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter
 
     memset(od_results, 0, sizeof(object_detect_result_list));
 
+    if (app_ctx->io_num.n_output == 1)
+    {
+        rknn_tensor_attr *attr = &app_ctx->output_attrs[0];
+        int channels = 0;
+        int anchors = 0;
+        bool channel_first = true;
+
+        if (attr->n_dims >= 3 && attr->dims[1] == OBJ_CLASS_NUM + 4)
+        {
+            channels = attr->dims[1];
+            anchors = attr->dims[2];
+            channel_first = true;
+        }
+        else if (attr->n_dims >= 3 && attr->dims[2] == OBJ_CLASS_NUM + 4)
+        {
+            channels = attr->dims[2];
+            anchors = attr->dims[1];
+            channel_first = false;
+        }
+        else
+        {
+            printf("unsupported YOLOv8 output shape: n_dims=%d dims=[%d, %d, %d, %d], expected channel count %d\n",
+                   attr->n_dims, attr->dims[0], attr->dims[1], attr->dims[2], attr->dims[3],
+                   OBJ_CLASS_NUM + 4);
+            return -1;
+        }
+
+#if defined(RV1106_1103)
+        printf("single-output YOLOv8 postprocess is not implemented for RV1106/1103 zero-copy path\n");
+        return -1;
+#else
+        if (attr->type == RKNN_TENSOR_INT8)
+        {
+            validCount += process_yolov8_one_output((int8_t *)_outputs[0].buf, attr->zp, attr->scale,
+                                                    channels, anchors, channel_first,
+                                                    filterBoxes, objProbs, classId, conf_threshold);
+        }
+        else if (attr->type == RKNN_TENSOR_UINT8)
+        {
+            validCount += process_yolov8_one_output((uint8_t *)_outputs[0].buf, attr->zp, attr->scale,
+                                                    channels, anchors, channel_first,
+                                                    filterBoxes, objProbs, classId, conf_threshold);
+        }
+        else
+        {
+            validCount += process_yolov8_one_output((float *)_outputs[0].buf, attr->zp, attr->scale,
+                                                    channels, anchors, channel_first,
+                                                    filterBoxes, objProbs, classId, conf_threshold);
+        }
+#endif
+    }
+    else
+    {
     // default 3 branch
 #ifdef RKNPU1
     int dfl_len = app_ctx->output_attrs[0].dims[2] / 4;
@@ -603,6 +733,7 @@ int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter
                                        filterBoxes, objProbs, classId, conf_threshold);
         }
 #endif
+    }
     }
 
     // no object detect

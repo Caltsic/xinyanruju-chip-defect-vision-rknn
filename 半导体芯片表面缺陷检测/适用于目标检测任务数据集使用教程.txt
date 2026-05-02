@@ -1,0 +1,8 @@
+将本数据集解压放入模型项目中，（一般在datasets文件夹下，视自己的模型而定）。
+本数据集适用于分类数据集。
+训练命令
+yolo detect train data=main/datasets/dataset/data.yaml model=yolov8n.yaml pretrained=yolov8n.pt epochs=200 batch=8 lr0=0.01 resume=True
+
+其中data=main/datasets/dataset/data.yaml 要指向你的数据集的yaml地址。这里要改
+
+训练细节请自行百度教程学习。

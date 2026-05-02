@@ -1,0 +1,6 @@
+dataset_raw/
+outputs/
+third_party/
+*.zip
+__pycache__/
+*.pyc
