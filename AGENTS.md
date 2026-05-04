@@ -31,3 +31,13 @@
 - 当前开发优先级围绕 IMX415 摄像头模组视觉识别链路展开，包括驱动/设备树、采集链路、图像处理、模型推理与板端验证。
 - 需要板端交互、环境检查、自动化执行或重复验证时，优先评估是否可使用 Hermes 辅助。
 - 若项目方向、资料位置、板端环境或开发主线发生变化，应同步更新 `README.md` 与本文件。
+
+## Git 约定
+
+- 当前开发分支：`chipCheck`。
+- 远端仓库：`git@github.com:Caltsic/-IMX415_Vision.git`。
+- 本仓库本地提交身份：
+  - `user.name=Caltsic`
+  - `user.email=2769003879@qq.com`
+- Windows 本机 GitHub SSH key 路径：`C:\Users\Kaltsit\.ssh\id_ed25519_github`。
+- 只记录 SSH key 路径，不提交私钥文件。

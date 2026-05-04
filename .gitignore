@@ -22,6 +22,12 @@ __pycache__/
 build/
 dist/
 
+# Generated local captures and diagnostics. Tracked baseline captures stay
+# tracked; this only keeps new experiment output out of git status.
+/captures/**
+!/captures/
+!/captures/.gitkeep
+
 # Generic archives and large model source formats
 *.rar
 *.zip

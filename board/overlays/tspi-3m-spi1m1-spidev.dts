@@ -1,0 +1,24 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "rockchip,rk3576";
+
+    fragment@0 {
+        target = <&spi1>;
+        __overlay__ {
+            status = "okay";
+            pinctrl-names = "default";
+            pinctrl-0 = <&spi1m1_pins &spi1m1_csn0>;
+            num-cs = <1>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            spidev@0 {
+                compatible = "rockchip,spidev";
+                reg = <0>;
+                spi-max-frequency = <3200000>;
+            };
+        };
+    };
+};

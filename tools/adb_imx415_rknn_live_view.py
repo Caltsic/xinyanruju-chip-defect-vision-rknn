@@ -37,6 +37,7 @@ YOLO11_REMOTE_MODEL = "model/yolo11n_rk3576.rknn"
 CHIP_REMOTE_WORKDIR = "/userdata/rknn_yolo11_demo"
 CHIP_REMOTE_BINARY = "./rknn_chip_defect_camera_stream"
 CHIP_REMOTE_MODEL = "model/chipcheck_yolov8_detect_int8.rknn"
+CHIP_MAIXCAM_REMOTE_BINARY = "./rknn_chip_defect_maixcam_stream"
 REMOTE_DEVICE = "/dev/video42"
 DEFAULT_REMOTE_LOG = "/tmp/rknn_yolo11_camera_stream.log"
 
@@ -246,7 +247,7 @@ def build_remote_command(args: argparse.Namespace) -> str:
         "--model",
         args.remote_model,
         "--device",
-        REMOTE_DEVICE,
+        args.device,
         "--width",
         args.width,
         "--height",
@@ -262,6 +263,10 @@ def build_remote_command(args: argparse.Namespace) -> str:
         "--nms",
         args.nms,
     ]
+    if args.camera_format:
+        stream_parts.extend(["--format", args.camera_format])
+    if args.roi:
+        stream_parts.extend(["--roi", args.roi])
     stream_command = shell_join(stream_parts)
     return (
         f"cd {shlex.quote(args.remote_workdir)} && "
@@ -484,10 +489,10 @@ def focus_score(image: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def draw_status(image: np.ndarray, fps: float, frame_info: StreamFrame, drawn_count: int, focus: float) -> None:
+def draw_status(image: np.ndarray, fps: float, frame_info: StreamFrame, raw_count: int, drawn_count: int, focus: float) -> None:
     text = (
         f"FPS {fps:.1f} | focus {focus:.0f} | "
-        f"{frame_info.width}x{frame_info.height} | det {drawn_count} | frame {frame_info.frame_index}"
+        f"{frame_info.width}x{frame_info.height} | det {raw_count}/{drawn_count} | frame {frame_info.frame_index}"
     )
     text_size, baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
     text_w, text_h = text_size
@@ -540,6 +545,14 @@ def profile_defaults(profile: str) -> tuple[str, str, str, list[str], str]:
             COCO_CLASSES,
             "RKNN YOLO11 IMX415 Live",
         )
+    if profile == "chip-defect-maixcam":
+        return (
+            CHIP_REMOTE_WORKDIR,
+            CHIP_MAIXCAM_REMOTE_BINARY,
+            CHIP_REMOTE_MODEL,
+            CHIP_DEFECT_CLASSES,
+            "RKNN Chip Defect MaixCAM Live",
+        )
     return (
         CHIP_REMOTE_WORKDIR,
         CHIP_REMOTE_BINARY,
@@ -568,7 +581,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--serial", default=DEFAULT_SERIAL, help="ADB serial; pass an empty string to omit -s")
     parser.add_argument(
         "--profile",
-        choices=("chip-defect", "yolo11"),
+        choices=("chip-defect", "chip-defect-maixcam", "yolo11"),
         default=DEFAULT_PROFILE,
         help="Remote binary/model/label preset",
     )
@@ -578,6 +591,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--labels", type=Path, help="Local label file for drawing class names")
     parser.add_argument("--width", type=positive_int, default=DEFAULT_WIDTH, help="Board camera stream width")
     parser.add_argument("--height", type=positive_int, default=DEFAULT_HEIGHT, help="Board camera stream height")
+    parser.add_argument("--device", default=REMOTE_DEVICE, help="Board V4L2 output node, e.g. /dev/video42 for CSI1 or /dev/video51 for CSI3")
+    parser.add_argument("--camera-format", choices=("yuyv", "mjpg"), help="Board V4L2 pixel format for single-plane UVC devices")
+    parser.add_argument("--roi", help="Board-side inference crop as X,Y,W,H; display frame remains full size")
     parser.add_argument("--fps", type=positive_int, default=DEFAULT_FPS, help="Board stream FPS request")
     parser.add_argument("--frames", type=nonnegative_int, default=0, help="Frame count; 0 means run until stopped")
     parser.add_argument("--skip", type=nonnegative_int, default=DEFAULT_SKIP, help="Initial frames skipped by board")
@@ -585,6 +601,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nms", type=threshold_float, default=DEFAULT_NMS, help="Board NMS IoU threshold")
     parser.add_argument("--headless", action="store_true", help="Do not open an OpenCV window")
     parser.add_argument("--save-snapshot", type=Path, help="Save the last annotated frame")
+    parser.add_argument("--save-clean-snapshot", type=Path, help="Save the last decoded camera frame before overlays")
     parser.add_argument("--window-name", help="OpenCV window title")
     parser.add_argument("--remote-log", default=DEFAULT_REMOTE_LOG, help="Board-side stderr log path")
     args = parser.parse_args()
@@ -595,6 +612,19 @@ def parse_args() -> argparse.Namespace:
     args.remote_model = args.remote_model or default_model
     args.default_class_names = default_labels
     args.window_name = args.window_name or default_window
+    if args.profile == "chip-defect-maixcam":
+        if args.device == REMOTE_DEVICE:
+            args.device = "/dev/video73"
+        if args.width == DEFAULT_WIDTH:
+            args.width = 1280
+        if args.height == DEFAULT_HEIGHT:
+            args.height = 720
+        if args.fps == DEFAULT_FPS:
+            args.fps = 30
+        if args.skip == DEFAULT_SKIP:
+            args.skip = 3
+        if args.camera_format is None:
+            args.camera_format = "mjpg"
 
     if args.width % 2 != 0 or args.height % 2 != 0:
         parser.error("NV12 width and height must be even")
@@ -604,6 +634,7 @@ def parse_args() -> argparse.Namespace:
 def print_headless_status(
     frame_info: StreamFrame,
     fps: float,
+    raw_count: int,
     drawn_count: int,
     focus: float,
     last_print: float,
@@ -613,7 +644,7 @@ def print_headless_status(
         return last_print
     print(
         f"frame={frame_info.frame_index} fps={fps:.1f} "
-        f"focus={focus:.0f} size={frame_info.width}x{frame_info.height} det={drawn_count}",
+        f"focus={focus:.0f} size={frame_info.width}x{frame_info.height} det={raw_count}/{drawn_count}",
         file=sys.stderr,
     )
     return now
@@ -630,6 +661,7 @@ def main() -> int:
     process: subprocess.Popen[bytes] | None = None
     process_started = False
     last_frame: np.ndarray | None = None
+    last_clean_frame: np.ndarray | None = None
     frames_seen = 0
     exit_code = 0
     fps_meter = FpsMeter()
@@ -649,10 +681,12 @@ def main() -> int:
                 break
 
             frame = nv12_to_bgr(frame_info.payload, frame_info.width, frame_info.height)
+            last_clean_frame = frame.copy()
             fps = fps_meter.tick()
             focus = focus_score(frame)
+            raw_count = len(frame_info.detections)
             drawn_count = draw_detections(frame, frame_info.detections, class_names)
-            draw_status(frame, fps, frame_info, drawn_count, focus)
+            draw_status(frame, fps, frame_info, raw_count, drawn_count, focus)
             last_frame = frame
             frames_seen += 1
 
@@ -660,6 +694,7 @@ def main() -> int:
                 last_headless_print = print_headless_status(
                     frame_info,
                     fps,
+                    raw_count,
                     drawn_count,
                     focus,
                     last_headless_print,
@@ -698,6 +733,13 @@ def main() -> int:
                 print(f"Saved snapshot: {args.save_snapshot}", file=sys.stderr)
             except Exception as exc:  # noqa: BLE001 - report cleanup-time failure
                 print(f"Snapshot save failed: {exc}", file=sys.stderr)
+                exit_code = 2
+        if args.save_clean_snapshot and last_clean_frame is not None:
+            try:
+                save_snapshot(args.save_clean_snapshot, last_clean_frame)
+                print(f"Saved clean snapshot: {args.save_clean_snapshot}", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001 - report cleanup-time failure
+                print(f"Clean snapshot save failed: {exc}", file=sys.stderr)
                 exit_code = 2
         if adb_stderr and (exit_code != 0 or frames_seen == 0):
             print(f"ADB stderr: {adb_stderr}", file=sys.stderr)

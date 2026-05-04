@@ -36,3 +36,8 @@
 | `007-电脑端实时显示RK3576_NPU_YOLO识别画面.md` | 需要运行实时 NPU YOLO 摄像头预览、确认协议和脚本命令时 | rknn_yolo11_camera_stream、adb_imx415_rknn_live_view.py、RYL1、实时显示 |
 | `008-芯片缺陷YOLOv8_RKNN云训练包.md` | 需要训练半导体芯片缺陷检测模型、生成 ONNX/RKNN FP/INT8、确认云端包结构和板端适配风险时 | YOLOv8、chip defect、polygon转bbox、INT8、RK3576、cloud_training |
 | `009-YOLOv8芯片缺陷RKNN板端实时流已适配.md` | 需要运行芯片缺陷 RKNN 实时检测、确认 YOLOv8 单输出后处理、板端部署文件和电脑端显示命令时 | YOLOv8、chip defect、rknn_chip_defect_camera_stream、1x8x8400、INT8、FP、adb_imx415_rknn_live_view.py |
+| `010-实拍无框与IMX415紫屏诊断.md` | 需要确认实拍无框、紫屏/色偏、IMX415 采集异常诊断时 | 实拍、无框、紫屏、IMX415、色偏 |
+| `011-新泰山派3M芯片缺陷RKNN部署记录.md` | 需要确认新泰山派3M上的芯片缺陷模型、二进制和 ADB 部署状态时 | 泰山派3M、芯片缺陷、RKNN、部署 |
+| `012-WS2812环形补光SPI部署记录.md` | 需要确认 WS2812-8 环形补光接线、SPI1 overlay、控制命令时 | WS2812、SPI1、spidev1.0、19脚、补光 |
+| `013-MaixCAM芯片ROI预处理最小闭环.md` | 需要运行 MaixCAM ROI 裁剪、轻量预处理、ONNX 最小闭环，或判断 chip 类训练路线时 | MaixCAM、ROI、预处理、chip、ONNX、light_gamma_clahe |
+| `014-硬件视觉链路开发注意事项.md` | 需要快速确认补光色偏、UVC/MJPEG 坏帧、设备占用、ROI/预处理、GUI 关闭等后续开发注意事项时 | 注意事项、WS2812、偏紫、MJPG、坏帧、Device busy、ROI、预处理、GUI |
