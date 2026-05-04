@@ -1,0 +1,9 @@
+﻿part,count,manifest,command
+part_001,100,chip_roi/review_tasks/existing_pseudo_800/part_001/manifest.csv,F:\anaconda\python.exe .\tools\review_chip_roi_labels.py --manifest .\chip_roi\review_tasks\existing_pseudo_800\part_001\manifest.csv
+part_002,100,chip_roi/review_tasks/existing_pseudo_800/part_002/manifest.csv,F:\anaconda\python.exe .\tools\review_chip_roi_labels.py --manifest .\chip_roi\review_tasks\existing_pseudo_800\part_002\manifest.csv
+part_003,100,chip_roi/review_tasks/existing_pseudo_800/part_003/manifest.csv,F:\anaconda\python.exe .\tools\review_chip_roi_labels.py --manifest .\chip_roi\review_tasks\existing_pseudo_800\part_003\manifest.csv
+part_004,100,chip_roi/review_tasks/existing_pseudo_800/part_004/manifest.csv,F:\anaconda\python.exe .\tools\review_chip_roi_labels.py --manifest .\chip_roi\review_tasks\existing_pseudo_800\part_004\manifest.csv
+part_005,100,chip_roi/review_tasks/existing_pseudo_800/part_005/manifest.csv,F:\anaconda\python.exe .\tools\review_chip_roi_labels.py --manifest .\chip_roi\review_tasks\existing_pseudo_800\part_005\manifest.csv
+part_006,100,chip_roi/review_tasks/existing_pseudo_800/part_006/manifest.csv,F:\anaconda\python.exe .\tools\review_chip_roi_labels.py --manifest .\chip_roi\review_tasks\existing_pseudo_800\part_006\manifest.csv
+part_007,100,chip_roi/review_tasks/existing_pseudo_800/part_007/manifest.csv,F:\anaconda\python.exe .\tools\review_chip_roi_labels.py --manifest .\chip_roi\review_tasks\existing_pseudo_800\part_007\manifest.csv
+part_008,100,chip_roi/review_tasks/existing_pseudo_800/part_008/manifest.csv,F:\anaconda\python.exe .\tools\review_chip_roi_labels.py --manifest .\chip_roi\review_tasks\existing_pseudo_800\part_008\manifest.csv

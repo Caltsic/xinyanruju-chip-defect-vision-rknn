@@ -28,6 +28,15 @@ dist/
 !/captures/
 !/captures/.gitkeep
 
+# Generated chip ROI datasets, captures, and review exports
+/chip_roi/generated/
+/chip_roi/captures/
+/chip_roi/review/
+/chip_roi/*.zip
+/chip_roi/*.tar
+/chip_roi/*.tar.gz
+/chip_roi/*.tgz
+
 # Generic archives and large model source formats
 *.rar
 *.zip
