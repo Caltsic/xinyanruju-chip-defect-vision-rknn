@@ -48,6 +48,10 @@ dist/
 *.pt
 *.pth
 *.pb
+*.rknn
+
+# Cloud run output snapshots are kept locally, not committed by default.
+/cloud_training/chip_roi_outputs_20260504/
 
 # Local secrets and machine-specific config
 .env

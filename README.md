@@ -100,8 +100,64 @@ F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py
 
 该命令默认使用 `chip-defect` profile，板端加载：
 
-- `model/chipcheck_yolov8_detect_int8.rknn`
+- `model/chipcheck_yolov8_detect_split_int8.rknn`
 - `model/chip_defect_labels.txt`
+
+已新增一类 `chip` ROI 实时 profile。当前默认使用已修通的 split-output INT8：
+
+- `model/chip_roi_yolov8_detect_split_int8.rknn`
+- `model/chip_roi_labels.txt`
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-roi-maixcam --conf 0.25
+```
+
+二阶段实时融合入口会在一个板端进程内串联 `chip ROI INT8 -> ROI crop -> defect INT8`：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
+```
+
+当前 defect 框会比 chip 框更容易跳动；脚本已默认对 `chip-two-stage-maixcam` 开启显示端短时平滑，并在板端对 chip ROI crop 做轻度平滑。当前实拍阈值扫描后建议用较高缺陷阈值和较高显示上限，避免靠 top-k 截断：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
+```
+
+二阶段默认不是每帧都重跑 chip/defect 两个模型，而是 `chip-interval=3`、`defect-interval=2`。未启用板端全帧输入调整时，该节奏在当前 MaixCAM 1280x720 MJPG 流上约 `10.3-10.9 FPS`；当前默认启用 input-adjust 后的速度见下文。速度优先、芯片基本静止时可以用：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20 --chip-interval 5 --defect-interval 3
+```
+
+该模式实测约 `11.3-12.4 FPS`，代价是 chip/defect 检测结果更新频率更低。
+
+`--defect-conf 0.05` 可用于低阈值诊断，但当前实拍画面会产生较多大框假阳性；`--no-smooth-boxes --no-display-filter` 可用于查看原始逐帧输出。
+
+启动 `chip-*` 实时 profile 时，脚本会默认先设置 WS2812：
+
+```text
+rgb=190,255,100
+brightness=0.50
+```
+
+`chip-two-stage-maixcam` 现在默认把当前推荐画面参数下沉到板端 NPU 输入。MaixCAM MJPG/YUYV 解码为 `RGB888` 后，板端先应用同一套轻量调整，再把调整后的 RGB888 同时送给 chip ROI / defect NPU，并转换为 NV12 回传给 PC 显示：
+
+```text
+Brightness -6
+Contrast 1.28
+Gamma 0.91
+Saturation 0.30
+Sharpness 0.85
+```
+
+`Denoise 6` 仍保留为 GUI 人工观察/落盘参数，不进入板端 NPU 输入；`CLAHE` 也不进入 NPU 输入。`--save-clean-snapshot` 在该模式下保存的是板端回传的已同步调整 clean 帧，不再是未调整原始帧。若现场优先速度，可降低或关闭锐化：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20 --input-sharpness 0
+```
+
+当前默认输入调整实测约 `8.3-9.2 FPS`；未做全帧输入调整时的二阶段节奏优化基线约 `10.3-10.9 FPS`。
 
 电脑端 YOLO11/COCO 实时显示仍可显式指定：
 
@@ -261,7 +317,45 @@ captures/roi_defect_closed_loop_capture/maixcam_current_clean_roi_closed_loop.jp
 captures/roi_defect_closed_loop_capture/maixcam_current_clean_variants.jpg
 ```
 
-该工具是板端化前的最小验证闭环；后续可把 ROI/preprocess 逻辑迁入 `rknn_chip_defect_maixcam_stream`，或训练一个独立 `chip` 定位模型。
+该工具现在会优先加载本地训练好的 `chip_roi_yolov8_detect.onnx` 来定位整颗芯片；若模型文件不存在或没有检出 chip 框，才回退到旧的暗区域/边缘 ROI。输出图中黄色框是缺陷模型输入 ROI，绿色/黄色中心线用于辅助判断芯片是否居中、大小是否合适。
+
+该工具是板端化前的最小验证闭环；后续可把“chip ROI -> ROI 内缺陷检测”的两阶段逻辑迁入板端 RKNN/C++，或先用新增的 `chip-roi-maixcam` profile 单独实时显示整颗芯片框。
+
+### GUI 实时调参与标注
+
+当前推荐用一体化 GUI 做二阶段实时观察、画面调参和 chip ROI 采集标注：
+
+```powershell
+F:\anaconda\python.exe -m tools.chip_capture_gui
+```
+
+GUI 默认启动等价于当前二阶段实时命令的板端流：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
+```
+
+界面中的 `Live Detect` 用于实时观察 chip + defect 框，`Capture / Label` 用于关闭检测框专注标注，`Draw detection boxes` 可随时单独开关检测框。`Sync view to NPU input` 默认开启，GUI 会把 `Brightness/Contrast/Gamma/Saturation/Sharpness` 同步写到板端 `/tmp/chip_input_adjust.conf`，因此实时画面与 NPU 输入一致。`Denoise/CLAHE` 不进入 NPU 输入，只作为人工观察或落盘辅助。
+
+`Save adjusted capture` 默认开启，采集时会把当前可见画面保存为标注样本，并在 `meta/*.json` 记录具体参数。
+
+### chip 类定位数据集
+
+整颗芯片 `chip` 类定位相关文件放在根部浅层目录：
+
+```text
+chip_roi/
+```
+
+该目录目前保存规划和标注规则：
+
+```text
+chip_roi/README.md
+chip_roi/dataset_plan.md
+chip_roi/label_rules.md
+```
+
+后续伪标签、实拍采集和人工复核输出分别放入 `chip_roi/generated/`、`chip_roi/captures/`、`chip_roi/review/`，这些目录默认不入 git。`chip` 框只负责稳定裁出芯片 ROI，不追求缺陷级轮廓精度。
 
 ## Git 配置
 
@@ -355,3 +449,31 @@ dataset_raw/chip_defect_raw
 第一版只做 YOLOv8 detect，不做 segmentation。数据准备脚本会把原始数据集中混合存在的 polygon 标注转换成 bbox 标注，并输出独立的检测训练数据副本，不覆盖原始标签。
 
 当前板端已新增 `rknn_chip_defect_camera_stream`，用于 YOLOv8 单输出 `1x8x8400` 缺陷检测后处理；旧 `rknn_yolo11_camera_stream` 仍保留给 YOLO11/COCO 80 类验证使用。
+
+## 二阶段 chip ROI + defect 实时检测
+
+当前默认实时路径优先使用 INT8：
+
+```text
+chip ROI INT8 -> chip ROI crop -> defect INT8 -> RYL1 实时回传
+```
+
+常规启动命令：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
+```
+
+该 profile 会自动设置 WS2812 补光，并默认启用板端 input-adjust，使 NPU 输入与回传显示画面一致。板端已经加入 defect 时序滤波：默认 `--defect-confirm 3` 要求连续命中后输出，`--defect-hold 3` 在短时 miss 后保持，`--defect-match-iou 0.10` 和 `--defect-match-center 0.55` 用于同类/跨类稳定匹配。`--display-max-defects 0` 表示保留显示 NMS 但不做数量截断。
+
+更稳但反应稍慢：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --defect-hold 5 --defect-smooth-alpha 0.25 --display-max-defects 20
+```
+
+如果需要排查板端原始滤波输出，关闭 PC 端显示平滑和显示过滤：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --no-smooth-boxes --no-display-filter
+```

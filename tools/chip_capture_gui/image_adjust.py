@@ -41,6 +41,17 @@ def _apply_clahe(image: np.ndarray, clip_limit: float) -> np.ndarray:
     return cv2.cvtColor(cv2.merge((l_channel, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
 
 
+def _apply_denoise(image: np.ndarray, strength: int) -> np.ndarray:
+    if strength <= 0:
+        return image
+    strength = max(1, min(30, strength))
+    if strength <= 8:
+        return cv2.bilateralFilter(image, 5, 8 + strength * 3, 5)
+    if strength <= 18:
+        return cv2.bilateralFilter(image, 7, 12 + strength * 2, 7)
+    return cv2.bilateralFilter(image, 9, 18 + strength * 2, 9)
+
+
 def _apply_sharpness(image: np.ndarray, amount: float) -> np.ndarray:
     if amount <= 0:
         return image
@@ -52,9 +63,7 @@ def apply_adjustments(image: np.ndarray, settings: ImageAdjustSettings) -> np.nd
     """Return a processed preview image without mutating the capture source."""
     result = _as_uint8_bgr(image).copy()
 
-    if settings.denoise > 0:
-        strength = max(1, min(30, settings.denoise))
-        result = cv2.fastNlMeansDenoisingColored(result, None, strength, strength, 7, 21)
+    result = _apply_denoise(result, settings.denoise)
 
     if not math.isclose(settings.contrast, 1.0, rel_tol=1e-3, abs_tol=1e-3) or settings.brightness != 0:
         result = cv2.convertScaleAbs(result, alpha=max(0.0, settings.contrast), beta=settings.brightness)

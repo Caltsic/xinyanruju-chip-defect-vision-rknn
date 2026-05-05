@@ -41,3 +41,17 @@
 | `012-WS2812环形补光SPI部署记录.md` | 需要确认 WS2812-8 环形补光接线、SPI1 overlay、控制命令时 | WS2812、SPI1、spidev1.0、19脚、补光 |
 | `013-MaixCAM芯片ROI预处理最小闭环.md` | 需要运行 MaixCAM ROI 裁剪、轻量预处理、ONNX 最小闭环，或判断 chip 类训练路线时 | MaixCAM、ROI、预处理、chip、ONNX、light_gamma_clahe |
 | `014-硬件视觉链路开发注意事项.md` | 需要快速确认补光色偏、UVC/MJPEG 坏帧、设备占用、ROI/预处理、GUI 关闭等后续开发注意事项时 | 注意事项、WS2812、偏紫、MJPG、坏帧、Device busy、ROI、预处理、GUI |
+| `015-chip类定位数据集目录规划.md` | 需要确认 chip 类目录、样本量、标注规则、训练阶段和 generated/captures/review 放置约定时 | chip_roi、chip 类、数据集、伪标签、负样本、标注规则 |
+| `016-chip类伪标签生成与复核GUI.md` | 需要运行 chip 伪标签生成、查看 manifest 输出、启动复核 GUI 或确认当前生成结果时 | build_chip_roi_dataset、review_chip_roi_labels、manifest、A/D/W/S、Delete |
+| `017-chip_capture_gui一体化实拍标注.md` | 需要用 GUI 实拍、自动顺序命名、自动生成 chip 框、Accept/Negative 写标签时 | chip_capture_gui、Capture ROI、自动编号、绿色主题、manifest |
+| `018-chip_roi_yolov8_cloud_training.md` | 需要确认 chip ROI 一类 YOLOv8 训练包、云端训练命令、INT8 RKNN 转换顺序和最终产物时 | chip_roi、YOLOv8、cloud_training、RTX5090、INT8、RKNN、rk3576 |
+| `019-chip_roi_runtime_alignment_and_capture_defaults.md` | 需要确认 chip ROI 运行接入、芯片居中辅助、GUI 默认拍摄参数和 denoise 卡顿处理时 | chip_roi、chip-roi-maixcam、ImageAdjustSettings、Denoise、Light50、两阶段 |
+| `020-chip_roi_realtime_deployment_and_next_stage.md` | 需要确认 chip ROI 实时部署状态、当前可用命令、FP/INT8 差异和下一阶段两阶段实时融合入口时 | chip_roi、实时部署、chip-roi-maixcam、FP RKNN、INT8、two-stage、MaixCAM |
+| `021-int8_first_runtime_plan_correction.md` | 需要确认为什么后续优先 INT8、FP 的定位、二阶段融合前置条件和修正规划时 | INT8优先、RK3576、FP基线、chip ROI、二阶段 |
+| `022-int8_split_output_and_two_stage_runtime.md` | 需要确认 INT8 无框根因、split-output RKNN 产物、二阶段板端实时命令和验证截图时 | INT8、split-output、chip-two-stage-maixcam、yolov8_scores、二阶段、MaixCAM |
+| `023-two_stage_temporal_stabilization.md` | 需要确认二阶段实时框跳动、chip ROI 平滑、显示端平滑/过滤和推荐观察命令时 | 二阶段、抖动、平滑、display-max-defects、roi-smooth-alpha、defect_conf |
+| `024-two_stage_fps_cadence_optimization.md` | 需要确认二阶段 FPS 优化、chip/defect 推理间隔、默认与速度优先命令时 | FPS、chip-interval、defect-interval、二阶段、节奏优化 |
+| `025-two_stage_board_defect_temporal_filter.md` | 需要确认板端 defect 时序滤波、连续命中、消失保持和跨类别稳定匹配参数时 | defect-confirm、defect-hold、defect-match、类别投票、板端滤波 |
+| `026-chip_capture_gui_two_stage_live_tuning.md` | 需要确认 GUI 内二阶段实时检测、调参采集、引脚/丝印/破损预设和验证结果时 | chip_capture_gui、Live Detect、Save adjusted、Pins、Text、Damage |
+| `027-board_input_adjust_matches_display.md` | 需要确认 MaixCAM 二阶段实时的 NPU 输入是否与显示画面一致、板端 input-adjust 参数、性能代价和关闭锐化方式时 | input-adjust、RGB888、NPU输入、显示一致、Sharpness、FPS |
+| `028-two_stage_threshold_display_tuning.md` | 需要确认二阶段 defect 置信度阈值、显示框数量限制来源、当前推荐显示命令时 | defect-conf、defect-confirm、display-max-defects、阈值扫描、top-k |

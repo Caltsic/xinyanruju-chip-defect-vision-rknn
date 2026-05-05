@@ -11,12 +11,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <string>
 #include <vector>
@@ -35,6 +37,18 @@ static_assert(sizeof(float) == 4, "protocol requires 32-bit float");
 
 #ifndef DEFAULT_MODEL_PATH
 #define DEFAULT_MODEL_PATH "model/yolo11n_rk3576.rknn"
+#endif
+
+#ifndef DEFAULT_DEFECT_MODEL_PATH
+#define DEFAULT_DEFECT_MODEL_PATH "model/chipcheck_yolov8_detect_split_int8.rknn"
+#endif
+
+#ifndef DEFAULT_TWO_STAGE
+#ifdef ENABLE_TWO_STAGE
+#define DEFAULT_TWO_STAGE 1
+#else
+#define DEFAULT_TWO_STAGE 0
+#endif
 #endif
 
 #ifndef LIVE_APP_NAME
@@ -66,6 +80,7 @@ static_assert(sizeof(float) == 4, "protocol requires 32-bit float");
 #endif
 
 const char kDefaultModel[] = DEFAULT_MODEL_PATH;
+const char kDefaultDefectModel[] = DEFAULT_DEFECT_MODEL_PATH;
 const char kDefaultDevice[] = DEFAULT_DEVICE_PATH;
 const char kDefaultFormat[] = DEFAULT_CAMERA_FORMAT;
 const uint32_t kDefaultWidth = DEFAULT_CAMERA_WIDTH;
@@ -75,7 +90,11 @@ const uint32_t kDefaultFrames = 0;
 const uint32_t kDefaultSkip = DEFAULT_CAMERA_SKIP;
 const uint32_t kDefaultBuffers = 4;
 const float kDefaultConfThreshold = BOX_THRESH;
+const float kDefaultChipConfThreshold = 0.25f;
+const float kDefaultDefectConfThreshold = 0.45f;
 const float kDefaultNmsThreshold = NMS_THRESH;
+const float kDefaultRoiMargin = 0.08f;
+const char kDefaultInputAdjustFile[] = "/tmp/chip_input_adjust.conf";
 const uint32_t kMaxPayloadSize = std::numeric_limits<uint32_t>::max();
 const char kProtocolMagic[] = "RYL1";
 
@@ -87,6 +106,7 @@ enum CameraInputFormat {
 
 struct Options {
     std::string model;
+    std::string defect_model;
     std::string device;
     std::string format;
     uint32_t width;
@@ -100,11 +120,33 @@ struct Options {
     uint32_t roi_y;
     uint32_t roi_w;
     uint32_t roi_h;
+    bool two_stage;
     float conf_threshold;
+    float chip_conf_threshold;
+    float defect_conf_threshold;
     float nms_threshold;
+    float roi_margin;
+    float roi_smooth_alpha;
+    uint32_t roi_hold;
+    uint32_t chip_interval;
+    uint32_t defect_interval;
+    uint32_t defect_confirm;
+    uint32_t defect_hold;
+    float defect_smooth_alpha;
+    float defect_match_iou;
+    float defect_match_center;
+    float defect_class_decay;
+    bool input_adjust_enabled;
+    int input_brightness;
+    float input_contrast;
+    float input_gamma;
+    float input_saturation;
+    float input_sharpness;
+    std::string input_adjust_file;
 
     Options()
         : model(kDefaultModel),
+          defect_model(kDefaultDefectModel),
           device(kDefaultDevice),
           format(kDefaultFormat),
           width(kDefaultWidth),
@@ -118,8 +160,91 @@ struct Options {
           roi_y(0),
           roi_w(0),
           roi_h(0),
+          two_stage(DEFAULT_TWO_STAGE != 0),
           conf_threshold(kDefaultConfThreshold),
-          nms_threshold(kDefaultNmsThreshold) {}
+          chip_conf_threshold(kDefaultChipConfThreshold),
+          defect_conf_threshold(kDefaultDefectConfThreshold),
+          nms_threshold(kDefaultNmsThreshold),
+          roi_margin(kDefaultRoiMargin),
+          roi_smooth_alpha(0.35f),
+          roi_hold(3),
+          chip_interval(3),
+          defect_interval(2),
+          defect_confirm(3),
+          defect_hold(3),
+          defect_smooth_alpha(0.35f),
+          defect_match_iou(0.10f),
+          defect_match_center(0.55f),
+          defect_class_decay(0.85f),
+          input_adjust_enabled(false),
+          input_brightness(-6),
+          input_contrast(1.28f),
+          input_gamma(0.91f),
+          input_saturation(0.30f),
+          input_sharpness(0.85f),
+          input_adjust_file(kDefaultInputAdjustFile) {}
+};
+
+struct InputAdjustParams {
+    bool enabled;
+    int brightness;
+    float contrast;
+    float gamma;
+    float saturation;
+    float sharpness;
+
+    InputAdjustParams()
+        : enabled(false),
+          brightness(0),
+          contrast(1.0f),
+          gamma(1.0f),
+          saturation(1.0f),
+          sharpness(0.0f) {}
+};
+
+struct InputAdjustRuntime {
+    InputAdjustParams params;
+    uint8_t lut[256];
+    time_t config_mtime;
+    long config_mtime_nsec;
+    bool lut_ready;
+    std::vector<uint8_t> scratch;
+
+    InputAdjustRuntime() : config_mtime(0), config_mtime_nsec(0), lut_ready(false)
+    {
+        memset(lut, 0, sizeof(lut));
+    }
+};
+
+struct TemporalBoxState {
+    bool has_box;
+    object_detect_result box;
+    uint32_t missed;
+
+    TemporalBoxState() : has_box(false), missed(0)
+    {
+        memset(&box, 0, sizeof(box));
+    }
+};
+
+struct DefectTrack {
+    object_detect_result det;
+    std::vector<float> class_scores;
+    uint32_t hits;
+    uint32_t consecutive_hits;
+    uint32_t missed;
+    bool confirmed;
+    bool matched_this_update;
+
+    DefectTrack()
+        : hits(0),
+          consecutive_hits(0),
+          missed(0),
+          confirmed(false),
+          matched_this_update(false)
+    {
+        memset(&det, 0, sizeof(det));
+    }
 };
 
 struct MappedPlane {
@@ -194,7 +319,14 @@ static void print_usage(const char *prog)
 {
     fprintf(stderr,
             "Usage: %s [--model PATH] [--device NODE] [--format yuyv|mjpg] [--width N] [--height N] "
-            "[--fps N] [--frames N] [--skip N] [--buffers N] [--roi X,Y,W,H] [--conf F] [--nms F]\n"
+            "[--fps N] [--frames N] [--skip N] [--buffers N] [--roi X,Y,W,H] [--conf F] [--nms F] "
+            "[--two-stage] [--defect-model PATH] [--chip-conf F] [--defect-conf F] [--roi-margin F] "
+            "[--roi-smooth-alpha F] [--roi-hold N] [--chip-interval N] [--defect-interval N] "
+            "[--defect-confirm N] [--defect-hold N] [--defect-smooth-alpha F] "
+            "[--defect-match-iou F] [--defect-match-center F] [--defect-class-decay F] "
+            "[--input-adjust|--no-input-adjust] [--input-brightness N] [--input-contrast F] "
+            "[--input-gamma F] [--input-saturation F] [--input-sharpness F] "
+            "[--input-adjust-file PATH]\n"
             "Defaults: --model %s --device %s --format %s --width %u --height %u "
             "--fps %u --frames %u --skip %u --buffers %u --conf %.3f --nms %.3f\n",
             prog, kDefaultModel, kDefaultDevice, kDefaultFormat, kDefaultWidth, kDefaultHeight,
@@ -220,6 +352,25 @@ static bool parse_u32(const char *text, uint32_t *value)
     return true;
 }
 
+static bool parse_i32(const char *text, int *value)
+{
+    if (text == NULL || text[0] == '\0') {
+        return false;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    long parsed = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        parsed < std::numeric_limits<int>::min() ||
+        parsed > std::numeric_limits<int>::max()) {
+        return false;
+    }
+
+    *value = static_cast<int>(parsed);
+    return true;
+}
+
 static bool parse_float_threshold(const char *text, float *value)
 {
     if (text == NULL || text[0] == '\0') {
@@ -230,6 +381,23 @@ static bool parse_float_threshold(const char *text, float *value)
     char *end = NULL;
     float parsed = strtof(text, &end);
     if (errno != 0 || end == text || *end != '\0' || parsed <= 0.0f || parsed >= 1.0f) {
+        return false;
+    }
+
+    *value = parsed;
+    return true;
+}
+
+static bool parse_float_value(const char *text, float *value)
+{
+    if (text == NULL || text[0] == '\0') {
+        return false;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    float parsed = strtof(text, &end);
+    if (errno != 0 || end == text || *end != '\0' || !std::isfinite(parsed)) {
         return false;
     }
 
@@ -341,6 +509,19 @@ static bool parse_numeric_option(int argc, char **argv, int *index, const char *
     return true;
 }
 
+static bool parse_int_option(int argc, char **argv, int *index, const char *name, int *value)
+{
+    std::string text;
+    if (!take_option_value(argc, argv, index, name, &text)) {
+        return false;
+    }
+    if (!parse_i32(text.c_str(), value)) {
+        fprintf(stderr, "invalid value for %s: %s\n", name, text.c_str());
+        return false;
+    }
+    return true;
+}
+
 static bool parse_float_option(int argc, char **argv, int *index, const char *name, float *value)
 {
     std::string text;
@@ -350,6 +531,19 @@ static bool parse_float_option(int argc, char **argv, int *index, const char *na
     if (!parse_float_threshold(text.c_str(), value)) {
         fprintf(stderr, "invalid value for %s: %s; expected 0.0 < value < 1.0\n",
                 name, text.c_str());
+        return false;
+    }
+    return true;
+}
+
+static bool parse_float_value_option(int argc, char **argv, int *index, const char *name, float *value)
+{
+    std::string text;
+    if (!take_option_value(argc, argv, index, name, &text)) {
+        return false;
+    }
+    if (!parse_float_value(text.c_str(), value)) {
+        fprintf(stderr, "invalid value for %s: %s\n", name, text.c_str());
         return false;
     }
     return true;
@@ -368,6 +562,12 @@ static bool parse_args(int argc, char **argv, Options *opts)
             if (!take_option_value(argc, argv, &i, "--model", &opts->model)) {
                 return false;
             }
+        } else if (arg == "--defect-model" || arg.compare(0, 15, "--defect-model=") == 0) {
+            if (!take_option_value(argc, argv, &i, "--defect-model", &opts->defect_model)) {
+                return false;
+            }
+        } else if (arg == "--two-stage") {
+            opts->two_stage = true;
         } else if (arg == "--device" || arg.compare(0, 9, "--device=") == 0) {
             if (!take_option_value(argc, argv, &i, "--device", &opts->device)) {
                 return false;
@@ -408,6 +608,87 @@ static bool parse_args(int argc, char **argv, Options *opts)
             if (!parse_float_option(argc, argv, &i, "--conf", &opts->conf_threshold)) {
                 return false;
             }
+            opts->defect_conf_threshold = opts->conf_threshold;
+        } else if (arg == "--chip-conf" || arg.compare(0, 12, "--chip-conf=") == 0) {
+            if (!parse_float_option(argc, argv, &i, "--chip-conf", &opts->chip_conf_threshold)) {
+                return false;
+            }
+        } else if (arg == "--defect-conf" || arg.compare(0, 14, "--defect-conf=") == 0) {
+            if (!parse_float_option(argc, argv, &i, "--defect-conf", &opts->defect_conf_threshold)) {
+                return false;
+            }
+        } else if (arg == "--roi-margin" || arg.compare(0, 13, "--roi-margin=") == 0) {
+            if (!parse_float_option(argc, argv, &i, "--roi-margin", &opts->roi_margin)) {
+                return false;
+            }
+        } else if (arg == "--roi-smooth-alpha" || arg.compare(0, 19, "--roi-smooth-alpha=") == 0) {
+            if (!parse_float_option(argc, argv, &i, "--roi-smooth-alpha", &opts->roi_smooth_alpha)) {
+                return false;
+            }
+        } else if (arg == "--roi-hold" || arg.compare(0, 11, "--roi-hold=") == 0) {
+            if (!parse_numeric_option(argc, argv, &i, "--roi-hold", &opts->roi_hold)) {
+                return false;
+            }
+        } else if (arg == "--chip-interval" || arg.compare(0, 16, "--chip-interval=") == 0) {
+            if (!parse_numeric_option(argc, argv, &i, "--chip-interval", &opts->chip_interval)) {
+                return false;
+            }
+        } else if (arg == "--defect-interval" || arg.compare(0, 18, "--defect-interval=") == 0) {
+            if (!parse_numeric_option(argc, argv, &i, "--defect-interval", &opts->defect_interval)) {
+                return false;
+            }
+        } else if (arg == "--defect-confirm" || arg.compare(0, 17, "--defect-confirm=") == 0) {
+            if (!parse_numeric_option(argc, argv, &i, "--defect-confirm", &opts->defect_confirm)) {
+                return false;
+            }
+        } else if (arg == "--defect-hold" || arg.compare(0, 14, "--defect-hold=") == 0) {
+            if (!parse_numeric_option(argc, argv, &i, "--defect-hold", &opts->defect_hold)) {
+                return false;
+            }
+        } else if (arg == "--defect-smooth-alpha" || arg.compare(0, 22, "--defect-smooth-alpha=") == 0) {
+            if (!parse_float_option(argc, argv, &i, "--defect-smooth-alpha", &opts->defect_smooth_alpha)) {
+                return false;
+            }
+        } else if (arg == "--defect-match-iou" || arg.compare(0, 19, "--defect-match-iou=") == 0) {
+            if (!parse_float_option(argc, argv, &i, "--defect-match-iou", &opts->defect_match_iou)) {
+                return false;
+            }
+        } else if (arg == "--defect-match-center" || arg.compare(0, 22, "--defect-match-center=") == 0) {
+            if (!parse_float_option(argc, argv, &i, "--defect-match-center", &opts->defect_match_center)) {
+                return false;
+            }
+        } else if (arg == "--defect-class-decay" || arg.compare(0, 21, "--defect-class-decay=") == 0) {
+            if (!parse_float_option(argc, argv, &i, "--defect-class-decay", &opts->defect_class_decay)) {
+                return false;
+            }
+        } else if (arg == "--input-adjust") {
+            opts->input_adjust_enabled = true;
+        } else if (arg == "--no-input-adjust") {
+            opts->input_adjust_enabled = false;
+        } else if (arg == "--input-brightness" || arg.rfind("--input-brightness=", 0) == 0) {
+            if (!parse_int_option(argc, argv, &i, "--input-brightness", &opts->input_brightness)) {
+                return false;
+            }
+        } else if (arg == "--input-contrast" || arg.rfind("--input-contrast=", 0) == 0) {
+            if (!parse_float_value_option(argc, argv, &i, "--input-contrast", &opts->input_contrast)) {
+                return false;
+            }
+        } else if (arg == "--input-gamma" || arg.rfind("--input-gamma=", 0) == 0) {
+            if (!parse_float_value_option(argc, argv, &i, "--input-gamma", &opts->input_gamma)) {
+                return false;
+            }
+        } else if (arg == "--input-saturation" || arg.rfind("--input-saturation=", 0) == 0) {
+            if (!parse_float_value_option(argc, argv, &i, "--input-saturation", &opts->input_saturation)) {
+                return false;
+            }
+        } else if (arg == "--input-sharpness" || arg.rfind("--input-sharpness=", 0) == 0) {
+            if (!parse_float_value_option(argc, argv, &i, "--input-sharpness", &opts->input_sharpness)) {
+                return false;
+            }
+        } else if (arg == "--input-adjust-file" || arg.rfind("--input-adjust-file=", 0) == 0) {
+            if (!take_option_value(argc, argv, &i, "--input-adjust-file", &opts->input_adjust_file)) {
+                return false;
+            }
         } else if (arg == "--nms" || arg.compare(0, 6, "--nms=") == 0) {
             if (!parse_float_option(argc, argv, &i, "--nms", &opts->nms_threshold)) {
                 return false;
@@ -423,10 +704,27 @@ static bool parse_args(int argc, char **argv, Options *opts)
         fprintf(stderr, "--model must not be empty\n");
         return false;
     }
+    if (opts->two_stage && opts->defect_model.empty()) {
+        fprintf(stderr, "--defect-model must not be empty in --two-stage mode\n");
+        return false;
+    }
     if (opts->device.empty()) {
         fprintf(stderr, "--device must not be empty\n");
         return false;
     }
+    if (opts->chip_interval == 0) {
+        opts->chip_interval = 1;
+    }
+    if (opts->defect_interval == 0) {
+        opts->defect_interval = 1;
+    }
+    if (opts->defect_confirm == 0) {
+        opts->defect_confirm = 1;
+    }
+    opts->input_contrast = std::max(0.0f, std::min(opts->input_contrast, 5.0f));
+    opts->input_gamma = std::max(0.05f, std::min(opts->input_gamma, 5.0f));
+    opts->input_saturation = std::max(0.0f, std::min(opts->input_saturation, 5.0f));
+    opts->input_sharpness = std::max(0.0f, std::min(opts->input_sharpness, 3.0f));
     if (opts->format == "jpeg") {
         opts->format = "mjpg";
     }
@@ -995,6 +1293,191 @@ static void rgb_to_nv12(const uint8_t *rgb, uint32_t width, uint32_t height,
     }
 }
 
+static InputAdjustParams input_adjust_from_options(const Options &opts)
+{
+    InputAdjustParams params;
+    params.enabled = opts.input_adjust_enabled;
+    params.brightness = opts.input_brightness;
+    params.contrast = std::max(0.0f, std::min(opts.input_contrast, 5.0f));
+    params.gamma = std::max(0.05f, std::min(opts.input_gamma, 5.0f));
+    params.saturation = std::max(0.0f, std::min(opts.input_saturation, 5.0f));
+    params.sharpness = std::max(0.0f, std::min(opts.input_sharpness, 3.0f));
+    return params;
+}
+
+static std::string trim_text(const std::string &text)
+{
+    const size_t start = text.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) {
+        return std::string();
+    }
+    const size_t end = text.find_last_not_of(" \t\r\n");
+    return text.substr(start, end - start + 1);
+}
+
+static void rebuild_input_adjust_lut(InputAdjustRuntime *adjust)
+{
+    const float contrast = std::max(0.0f, std::min(adjust->params.contrast, 5.0f));
+    const float gamma = std::max(0.05f, std::min(adjust->params.gamma, 5.0f));
+    const float inv_gamma = 1.0f / gamma;
+    for (int value = 0; value < 256; ++value) {
+        float adjusted = static_cast<float>(value) * contrast +
+                         static_cast<float>(adjust->params.brightness);
+        adjusted = std::max(0.0f, std::min(adjusted, 255.0f));
+        if (std::fabs(gamma - 1.0f) > 0.001f) {
+            adjusted = std::pow(adjusted / 255.0f, inv_gamma) * 255.0f;
+        }
+        adjust->lut[value] = clamp_u8(static_cast<int>(adjusted + 0.5f));
+    }
+    adjust->lut_ready = true;
+}
+
+static void set_input_adjust_value(InputAdjustParams *params,
+                                   const std::string &key,
+                                   const std::string &value)
+{
+    if (key == "enabled") {
+        int parsed = 0;
+        if (parse_i32(value.c_str(), &parsed)) {
+            params->enabled = parsed != 0;
+        }
+        return;
+    }
+    if (key == "brightness") {
+        int parsed = 0;
+        if (parse_i32(value.c_str(), &parsed)) {
+            params->brightness = parsed;
+        }
+        return;
+    }
+
+    float parsed = 0.0f;
+    if (!parse_float_value(value.c_str(), &parsed)) {
+        return;
+    }
+    if (key == "contrast") {
+        params->contrast = std::max(0.0f, std::min(parsed, 5.0f));
+    } else if (key == "gamma") {
+        params->gamma = std::max(0.05f, std::min(parsed, 5.0f));
+    } else if (key == "saturation") {
+        params->saturation = std::max(0.0f, std::min(parsed, 5.0f));
+    } else if (key == "sharpness") {
+        params->sharpness = std::max(0.0f, std::min(parsed, 3.0f));
+    }
+}
+
+static bool read_input_adjust_file(const std::string &path, InputAdjustParams *params)
+{
+    FILE *file = fopen(path.c_str(), "r");
+    if (file == NULL) {
+        return false;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        std::string text = trim_text(line);
+        if (text.empty() || text[0] == '#') {
+            continue;
+        }
+        const size_t equals = text.find('=');
+        if (equals == std::string::npos) {
+            continue;
+        }
+        const std::string key = trim_text(text.substr(0, equals));
+        const std::string value = trim_text(text.substr(equals + 1));
+        set_input_adjust_value(params, key, value);
+    }
+    fclose(file);
+    return true;
+}
+
+static void refresh_input_adjust_runtime(const Options &opts, InputAdjustRuntime *adjust)
+{
+    if (!adjust->lut_ready) {
+        adjust->params = input_adjust_from_options(opts);
+        rebuild_input_adjust_lut(adjust);
+    }
+
+    if (opts.input_adjust_file.empty()) {
+        return;
+    }
+
+    struct stat st;
+    if (stat(opts.input_adjust_file.c_str(), &st) != 0) {
+        return;
+    }
+    const long mtime_nsec = st.st_mtim.tv_nsec;
+    if (adjust->config_mtime == st.st_mtime && adjust->config_mtime_nsec == mtime_nsec) {
+        return;
+    }
+
+    InputAdjustParams params = adjust->params;
+    if (read_input_adjust_file(opts.input_adjust_file, &params)) {
+        adjust->params = params;
+        adjust->config_mtime = st.st_mtime;
+        adjust->config_mtime_nsec = mtime_nsec;
+        rebuild_input_adjust_lut(adjust);
+    }
+}
+
+static void apply_input_adjustment(uint8_t *rgb,
+                                   uint32_t width,
+                                   uint32_t height,
+                                   InputAdjustRuntime *adjust)
+{
+    if (rgb == NULL || width == 0 || height == 0 || !adjust->params.enabled) {
+        return;
+    }
+
+    const size_t pixel_count = static_cast<size_t>(width) * height;
+    const int sat_q8 = static_cast<int>(std::max(0.0f, std::min(adjust->params.saturation, 5.0f)) * 256.0f + 0.5f);
+    const int sharp_q8 = static_cast<int>(std::max(0.0f, std::min(adjust->params.sharpness, 3.0f)) * 256.0f + 0.5f);
+    const bool sharpen = sharp_q8 > 0 && width >= 3 && height >= 3;
+    if (sharpen) {
+        adjust->scratch.resize(pixel_count);
+    }
+    for (size_t index = 0; index < pixel_count; ++index) {
+        uint8_t *p = rgb + index * 3;
+        int r = adjust->lut[p[0]];
+        int g = adjust->lut[p[1]];
+        int b = adjust->lut[p[2]];
+        if (sat_q8 != 256) {
+            const int gray = (77 * r + 150 * g + 29 * b + 128) >> 8;
+            r = gray + (((r - gray) * sat_q8) >> 8);
+            g = gray + (((g - gray) * sat_q8) >> 8);
+            b = gray + (((b - gray) * sat_q8) >> 8);
+        }
+        p[0] = clamp_u8(r);
+        p[1] = clamp_u8(g);
+        p[2] = clamp_u8(b);
+        if (sharpen) {
+            adjust->scratch[index] = clamp_u8((77 * p[0] + 150 * p[1] + 29 * p[2] + 128) >> 8);
+        }
+    }
+
+    if (!sharpen) {
+        return;
+    }
+
+    const uint8_t *luma = adjust->scratch.data();
+    for (uint32_t row = 1; row + 1 < height; ++row) {
+        for (uint32_t col = 1; col + 1 < width; ++col) {
+            const size_t pixel_offset = static_cast<size_t>(row) * width + col;
+            const int center = luma[pixel_offset];
+            const int blur = (center * 4 +
+                              luma[pixel_offset - 1] +
+                              luma[pixel_offset + 1] +
+                              luma[pixel_offset - width] +
+                              luma[pixel_offset + width] + 4) >> 3;
+            const int boost = ((center - blur) * sharp_q8) >> 8;
+            const size_t offset = pixel_offset * 3;
+            for (int channel = 0; channel < 3; ++channel) {
+                rgb[offset + channel] = clamp_u8(static_cast<int>(rgb[offset + channel]) + boost);
+            }
+        }
+    }
+}
+
 static bool copy_mjpeg_frame(const CameraContext &cam, const struct v4l2_buffer &buf,
                              std::vector<uint8_t> *rgb_out, std::vector<uint8_t> *nv12_out,
                              image_buffer_t *image)
@@ -1008,6 +1491,7 @@ static bool copy_mjpeg_frame(const CameraContext &cam, const struct v4l2_buffer 
     fprintf(stderr, "MJPG input requires libjpeg-turbo support\n");
     return false;
 #else
+    (void)nv12_out;
     if (buf.index >= cam.buffers.size() || cam.buffers[buf.index].planes.empty()) {
         fprintf(stderr, "invalid MJPG buffer index %u\n", buf.index);
         return false;
@@ -1079,8 +1563,6 @@ static bool copy_mjpeg_frame(const CameraContext &cam, const struct v4l2_buffer 
         return false;
     }
     tjDestroy(handle);
-
-    rgb_to_nv12(rgb_out->data(), static_cast<uint32_t>(width), static_cast<uint32_t>(height), nv12_out);
 
     image->width = width;
     image->height = height;
@@ -1243,6 +1725,54 @@ static bool prepare_roi_rgb(const Options &opts, const image_buffer_t &src,
     return true;
 }
 
+static int clamp_i32(int value, int low, int high);
+
+static bool crop_rgb_rect(const image_buffer_t &src, const image_rect_t &box, float margin,
+                          std::vector<uint8_t> *roi_rgb, image_buffer_t *dst,
+                          uint32_t *offset_x, uint32_t *offset_y)
+{
+    if (src.format != IMAGE_FORMAT_RGB888 || src.virt_addr == NULL || src.width <= 0 ||
+        src.height <= 0 || src.width_stride <= 0) {
+        fprintf(stderr, "two-stage crop requires a valid RGB888 source image\n");
+        return false;
+    }
+
+    const int src_width = src.width;
+    const int src_height = src.height;
+    const int box_w = std::max(1, box.right - box.left);
+    const int box_h = std::max(1, box.bottom - box.top);
+    const int margin_x = static_cast<int>(box_w * margin + 0.5f);
+    const int margin_y = static_cast<int>(box_h * margin + 0.5f);
+    const int left = clamp_i32(box.left - margin_x, 0, src_width - 1);
+    const int top = clamp_i32(box.top - margin_y, 0, src_height - 1);
+    const int right = clamp_i32(box.right + margin_x, left + 2, src_width);
+    const int bottom = clamp_i32(box.bottom + margin_y, top + 2, src_height);
+    const uint32_t roi_w = static_cast<uint32_t>(right - left);
+    const uint32_t roi_h = static_cast<uint32_t>(bottom - top);
+
+    roi_rgb->resize(static_cast<size_t>(roi_w) * roi_h * 3);
+    const uint8_t *src_ptr = src.virt_addr;
+    for (uint32_t row = 0; row < roi_h; ++row) {
+        const size_t src_offset = (static_cast<size_t>(top) + row) * src.width_stride * 3 +
+                                  static_cast<size_t>(left) * 3;
+        const size_t dst_offset = static_cast<size_t>(row) * roi_w * 3;
+        memcpy(roi_rgb->data() + dst_offset, src_ptr + src_offset, static_cast<size_t>(roi_w) * 3);
+    }
+
+    memset(dst, 0, sizeof(*dst));
+    dst->width = static_cast<int>(roi_w);
+    dst->height = static_cast<int>(roi_h);
+    dst->width_stride = static_cast<int>(roi_w);
+    dst->height_stride = static_cast<int>(roi_h);
+    dst->format = IMAGE_FORMAT_RGB888;
+    dst->virt_addr = roi_rgb->data();
+    dst->size = static_cast<int>(roi_rgb->size());
+    dst->fd = 0;
+    *offset_x = static_cast<uint32_t>(left);
+    *offset_y = static_cast<uint32_t>(top);
+    return true;
+}
+
 static int clamp_i32(int value, int low, int high)
 {
     return std::max(low, std::min(value, high));
@@ -1267,6 +1797,395 @@ static void translate_results_from_roi(object_detect_result_list *results,
     }
 }
 
+static bool select_primary_chip(const object_detect_result_list &chip_results,
+                                object_detect_result *selected)
+{
+    float best_score = -1.0f;
+    int best_index = -1;
+    for (int i = 0; i < chip_results.count && i < OBJ_NUMB_MAX_SIZE; ++i) {
+        const object_detect_result &det = chip_results.results[i];
+        const int w = det.box.right - det.box.left;
+        const int h = det.box.bottom - det.box.top;
+        if (w <= 1 || h <= 1) {
+            continue;
+        }
+        const float area = static_cast<float>(w) * static_cast<float>(h);
+        const float score = area * std::max(0.01f, det.prop);
+        if (score > best_score) {
+            best_score = score;
+            best_index = i;
+        }
+    }
+    if (best_index < 0) {
+        return false;
+    }
+    *selected = chip_results.results[best_index];
+    return true;
+}
+
+static int smooth_coord(int previous, int current, float alpha)
+{
+    const float value = static_cast<float>(previous) * (1.0f - alpha) +
+                        static_cast<float>(current) * alpha;
+    return static_cast<int>(std::lround(value));
+}
+
+static void sanitize_box(image_rect_t *box, uint32_t image_width, uint32_t image_height)
+{
+    const int max_x = static_cast<int>(image_width) - 1;
+    const int max_y = static_cast<int>(image_height) - 1;
+    box->left = clamp_i32(box->left, 0, max_x);
+    box->right = clamp_i32(box->right, 0, max_x);
+    box->top = clamp_i32(box->top, 0, max_y);
+    box->bottom = clamp_i32(box->bottom, 0, max_y);
+    if (box->right <= box->left) {
+        box->left = clamp_i32(box->left, 0, std::max(0, max_x - 2));
+        box->right = clamp_i32(box->left + 2, 0, max_x);
+    }
+    if (box->bottom <= box->top) {
+        box->top = clamp_i32(box->top, 0, std::max(0, max_y - 2));
+        box->bottom = clamp_i32(box->top + 2, 0, max_y);
+    }
+}
+
+static object_detect_result smooth_chip_detection(TemporalBoxState *state,
+                                                  const object_detect_result &current,
+                                                  float alpha,
+                                                  uint32_t image_width,
+                                                  uint32_t image_height)
+{
+    const float clamped_alpha = std::max(0.01f, std::min(alpha, 1.0f));
+    if (!state->has_box) {
+        state->box = current;
+        state->has_box = true;
+        state->missed = 0;
+        sanitize_box(&state->box.box, image_width, image_height);
+        return state->box;
+    }
+
+    object_detect_result smoothed = current;
+    smoothed.box.left = smooth_coord(state->box.box.left, current.box.left, clamped_alpha);
+    smoothed.box.top = smooth_coord(state->box.box.top, current.box.top, clamped_alpha);
+    smoothed.box.right = smooth_coord(state->box.box.right, current.box.right, clamped_alpha);
+    smoothed.box.bottom = smooth_coord(state->box.box.bottom, current.box.bottom, clamped_alpha);
+    smoothed.prop = state->box.prop * (1.0f - clamped_alpha) + current.prop * clamped_alpha;
+    sanitize_box(&smoothed.box, image_width, image_height);
+    state->box = smoothed;
+    state->missed = 0;
+    return state->box;
+}
+
+static bool hold_chip_detection(TemporalBoxState *state,
+                                uint32_t max_hold,
+                                object_detect_result *held)
+{
+    if (!state->has_box || state->missed >= max_hold) {
+        return false;
+    }
+    ++state->missed;
+    *held = state->box;
+    held->prop *= 0.90f;
+    return true;
+}
+
+static bool reuse_chip_detection(const TemporalBoxState &state,
+                                 object_detect_result *held)
+{
+    if (!state.has_box) {
+        return false;
+    }
+    *held = state.box;
+    return true;
+}
+
+static float rect_iou(const image_rect_t &a, const image_rect_t &b)
+{
+    const int left = std::max(a.left, b.left);
+    const int top = std::max(a.top, b.top);
+    const int right = std::min(a.right, b.right);
+    const int bottom = std::min(a.bottom, b.bottom);
+    const int inter_w = std::max(0, right - left);
+    const int inter_h = std::max(0, bottom - top);
+    const float inter = static_cast<float>(inter_w) * static_cast<float>(inter_h);
+    if (inter <= 0.0f) {
+        return 0.0f;
+    }
+
+    const float area_a = static_cast<float>(std::max(0, a.right - a.left)) *
+                         static_cast<float>(std::max(0, a.bottom - a.top));
+    const float area_b = static_cast<float>(std::max(0, b.right - b.left)) *
+                         static_cast<float>(std::max(0, b.bottom - b.top));
+    const float uni = area_a + area_b - inter;
+    return uni > 0.0f ? inter / uni : 0.0f;
+}
+
+static float rect_center_distance_ratio(const image_rect_t &a, const image_rect_t &b)
+{
+    const float ax = (static_cast<float>(a.left) + static_cast<float>(a.right)) * 0.5f;
+    const float ay = (static_cast<float>(a.top) + static_cast<float>(a.bottom)) * 0.5f;
+    const float bx = (static_cast<float>(b.left) + static_cast<float>(b.right)) * 0.5f;
+    const float by = (static_cast<float>(b.top) + static_cast<float>(b.bottom)) * 0.5f;
+    const float dx = ax - bx;
+    const float dy = ay - by;
+    const float distance = std::sqrt(dx * dx + dy * dy);
+    const float scale = std::max(1.0f,
+                                 static_cast<float>(std::max(std::max(a.right - a.left, a.bottom - a.top),
+                                                             std::max(b.right - b.left, b.bottom - b.top))));
+    return distance / scale;
+}
+
+static int dominant_class(const std::vector<float> &scores, int fallback)
+{
+    float best = -1.0f;
+    int best_class = fallback;
+    for (size_t i = 0; i < scores.size(); ++i) {
+        if (scores[i] > best) {
+            best = scores[i];
+            best_class = static_cast<int>(i);
+        }
+    }
+    return best_class;
+}
+
+static int stable_dominant_class(const std::vector<float> &scores, int current, int fallback)
+{
+    const int best_class = dominant_class(scores, fallback);
+    if (current < 0 || current >= static_cast<int>(scores.size()) || best_class == current) {
+        return best_class;
+    }
+
+    const float current_score = scores[static_cast<size_t>(current)];
+    const float best_score = best_class >= 0 && best_class < static_cast<int>(scores.size())
+                                 ? scores[static_cast<size_t>(best_class)]
+                                 : 0.0f;
+    if (current_score <= 0.0f) {
+        return best_class;
+    }
+
+    const float switch_threshold = current_score * 1.25f + 0.05f;
+    return best_score > switch_threshold ? best_class : current;
+}
+
+class DefectTemporalFilter {
+public:
+    DefectTemporalFilter() : class_count_(0) {}
+
+    void configure(int class_count)
+    {
+        class_count_ = std::max(1, class_count);
+        tracks_.clear();
+    }
+
+    void update(const object_detect_result_list &input,
+                const Options &opts,
+                uint32_t image_width,
+                uint32_t image_height,
+                object_detect_result_list *output)
+    {
+        ensure_configured();
+        for (size_t i = 0; i < tracks_.size(); ++i) {
+            tracks_[i].matched_this_update = false;
+        }
+
+        std::vector<object_detect_result> candidates;
+        candidates.reserve(std::max(0, input.count));
+        for (int i = 0; i < input.count && i < OBJ_NUMB_MAX_SIZE; ++i) {
+            object_detect_result det = input.results[i];
+            if (det.box.right <= det.box.left || det.box.bottom <= det.box.top) {
+                continue;
+            }
+            sanitize_box(&det.box, image_width, image_height);
+            candidates.push_back(det);
+        }
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const object_detect_result &a, const object_detect_result &b) {
+                      return a.prop > b.prop;
+                  });
+
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            const object_detect_result &candidate = candidates[i];
+            int best_index = -1;
+            bool best_already_matched = false;
+            float best_score = -1.0f;
+            for (size_t t = 0; t < tracks_.size(); ++t) {
+                float match_score = 0.0f;
+                if (!match_score_for(tracks_[t], candidate, opts, &match_score)) {
+                    continue;
+                }
+                if (match_score > best_score) {
+                    best_score = match_score;
+                    best_index = static_cast<int>(t);
+                    best_already_matched = tracks_[t].matched_this_update;
+                }
+            }
+
+            if (best_index >= 0) {
+                if (best_already_matched) {
+                    vote_class(&tracks_[best_index], candidate, opts);
+                } else {
+                    update_track(&tracks_[best_index], candidate, opts, image_width, image_height);
+                }
+                continue;
+            }
+
+            create_track(candidate, opts, image_width, image_height);
+        }
+
+        std::vector<DefectTrack> next_tracks;
+        next_tracks.reserve(tracks_.size());
+        for (size_t i = 0; i < tracks_.size(); ++i) {
+            DefectTrack track = tracks_[i];
+            if (!track.matched_this_update) {
+                track.missed += 1;
+                track.consecutive_hits = 0;
+                track.det.prop *= 0.90f;
+            }
+            if (track.missed <= opts.defect_hold) {
+                next_tracks.push_back(track);
+            }
+        }
+        tracks_.swap(next_tracks);
+
+        fill_output(opts, output);
+    }
+
+    void fill_output(const Options &opts, object_detect_result_list *output) const
+    {
+        memset(output, 0, sizeof(*output));
+        std::vector<object_detect_result> visible;
+        visible.reserve(tracks_.size());
+        for (size_t i = 0; i < tracks_.size(); ++i) {
+            const DefectTrack &track = tracks_[i];
+            if (!track.confirmed) {
+                continue;
+            }
+            if (track.det.prop <= 0.001f) {
+                continue;
+            }
+            visible.push_back(track.det);
+        }
+        std::sort(visible.begin(), visible.end(),
+                  [](const object_detect_result &a, const object_detect_result &b) {
+                      return a.prop > b.prop;
+                  });
+        for (size_t i = 0; i < visible.size() && output->count < OBJ_NUMB_MAX_SIZE; ++i) {
+            output->results[output->count++] = visible[i];
+        }
+    }
+
+private:
+    int class_count_;
+    std::vector<DefectTrack> tracks_;
+
+    void ensure_configured()
+    {
+        if (class_count_ <= 0) {
+            class_count_ = 4;
+        }
+    }
+
+    bool match_score_for(const DefectTrack &track,
+                         const object_detect_result &candidate,
+                         const Options &opts,
+                         float *score) const
+    {
+        const float iou = rect_iou(track.det.box, candidate.box);
+        const float center_ratio = rect_center_distance_ratio(track.det.box, candidate.box);
+        if (iou < opts.defect_match_iou && center_ratio > opts.defect_match_center) {
+            return false;
+        }
+        const float center_bonus = opts.defect_match_center > 0.0f
+                                       ? std::max(0.0f, 1.0f - center_ratio / opts.defect_match_center)
+                                       : 0.0f;
+        const float class_bonus = track.det.cls_id == candidate.cls_id ? 0.05f : 0.0f;
+        *score = iou + 0.25f * center_bonus + class_bonus;
+        return true;
+    }
+
+    void decay_votes(DefectTrack *track, const Options &opts)
+    {
+        const float decay = std::max(0.01f, std::min(opts.defect_class_decay, 0.99f));
+        for (size_t i = 0; i < track->class_scores.size(); ++i) {
+            track->class_scores[i] *= decay;
+        }
+    }
+
+    void vote_class(DefectTrack *track, const object_detect_result &candidate, const Options &opts)
+    {
+        decay_votes(track, opts);
+        if (candidate.cls_id >= 0 && candidate.cls_id < static_cast<int>(track->class_scores.size())) {
+            track->class_scores[static_cast<size_t>(candidate.cls_id)] += std::max(0.001f, candidate.prop);
+        }
+        track->det.cls_id = stable_dominant_class(track->class_scores, track->det.cls_id,
+                                                  candidate.cls_id);
+    }
+
+    void update_track(DefectTrack *track,
+                      const object_detect_result &candidate,
+                      const Options &opts,
+                      uint32_t image_width,
+                      uint32_t image_height)
+    {
+        const float alpha = std::max(0.01f, std::min(opts.defect_smooth_alpha, 1.0f));
+        track->det.box.left = smooth_coord(track->det.box.left, candidate.box.left, alpha);
+        track->det.box.top = smooth_coord(track->det.box.top, candidate.box.top, alpha);
+        track->det.box.right = smooth_coord(track->det.box.right, candidate.box.right, alpha);
+        track->det.box.bottom = smooth_coord(track->det.box.bottom, candidate.box.bottom, alpha);
+        sanitize_box(&track->det.box, image_width, image_height);
+        track->det.prop = track->det.prop * (1.0f - alpha) + candidate.prop * alpha;
+        track->hits += 1;
+        track->consecutive_hits += 1;
+        if (track->consecutive_hits >= opts.defect_confirm) {
+            track->confirmed = true;
+        }
+        track->missed = 0;
+        track->matched_this_update = true;
+        vote_class(track, candidate, opts);
+    }
+
+    void create_track(const object_detect_result &candidate,
+                      const Options &opts,
+                      uint32_t image_width,
+                      uint32_t image_height)
+    {
+        DefectTrack track;
+        track.det = candidate;
+        sanitize_box(&track.det.box, image_width, image_height);
+        track.class_scores.assign(static_cast<size_t>(class_count_), 0.0f);
+        if (candidate.cls_id >= 0 && candidate.cls_id < class_count_) {
+            track.class_scores[static_cast<size_t>(candidate.cls_id)] = std::max(0.001f, candidate.prop);
+        }
+        track.det.cls_id = dominant_class(track.class_scores, candidate.cls_id);
+        track.hits = 1;
+        track.consecutive_hits = 1;
+        track.confirmed = track.consecutive_hits >= opts.defect_confirm;
+        track.missed = 0;
+        track.matched_this_update = true;
+        tracks_.push_back(track);
+    }
+};
+
+static void append_detection(object_detect_result_list *dst,
+                             const object_detect_result &src,
+                             int class_offset,
+                             uint32_t image_width,
+                             uint32_t image_height)
+{
+    if (dst->count >= OBJ_NUMB_MAX_SIZE) {
+        return;
+    }
+
+    const int max_x = static_cast<int>(image_width) - 1;
+    const int max_y = static_cast<int>(image_height) - 1;
+    object_detect_result *out = &dst->results[dst->count++];
+    *out = src;
+    out->cls_id = src.cls_id + class_offset;
+    out->box.left = clamp_i32(out->box.left, 0, max_x);
+    out->box.right = clamp_i32(out->box.right, 0, max_x);
+    out->box.top = clamp_i32(out->box.top, 0, max_y);
+    out->box.bottom = clamp_i32(out->box.bottom, 0, max_y);
+}
+
 }  // namespace
 
 int main(int argc, char **argv)
@@ -1287,7 +2206,11 @@ int main(int argc, char **argv)
     bool camera_started = false;
     CameraContext camera;
     rknn_app_context_t rknn_app_ctx;
+    rknn_app_context_t defect_app_ctx;
+    DefectTemporalFilter defect_filter;
+    InputAdjustRuntime input_adjust;
     memset(&rknn_app_ctx, 0, sizeof(rknn_app_ctx));
+    memset(&defect_app_ctx, 0, sizeof(defect_app_ctx));
 
     const size_t frame_size = static_cast<size_t>(opts.width) * opts.height * 3 / 2;
     std::vector<uint8_t> frame;
@@ -1299,6 +2222,10 @@ int main(int argc, char **argv)
     uint32_t emitted = 0;
     uint32_t consecutive_mjpeg_errors = 0;
     const uint32_t max_consecutive_mjpeg_errors = 60;
+    TemporalBoxState chip_box_state;
+    object_detect_result_list cached_defect_results;
+    memset(&cached_defect_results, 0, sizeof(cached_defect_results));
+    bool has_cached_defect_results = false;
 
     if (init_post_process() != 0) {
         fprintf(stderr, "init_post_process failed\n");
@@ -1312,8 +2239,19 @@ int main(int argc, char **argv)
         exit_code = 1;
         goto out;
     }
-    rknn_app_ctx.box_conf_threshold = opts.conf_threshold;
+    rknn_app_ctx.box_conf_threshold = opts.two_stage ? opts.chip_conf_threshold : opts.conf_threshold;
     rknn_app_ctx.nms_threshold = opts.nms_threshold;
+
+    if (opts.two_stage) {
+        if (init_yolo11_model(opts.defect_model.c_str(), &defect_app_ctx) != 0) {
+            fprintf(stderr, "init_yolo11_model failed: %s\n", opts.defect_model.c_str());
+            exit_code = 1;
+            goto out;
+        }
+        defect_app_ctx.box_conf_threshold = opts.defect_conf_threshold;
+        defect_app_ctx.nms_threshold = opts.nms_threshold;
+        defect_filter.configure(defect_app_ctx.class_count);
+    }
 
     if (!open_camera(opts, &camera)) {
         exit_code = 1;
@@ -1331,6 +2269,22 @@ int main(int argc, char **argv)
             opts.conf_threshold, opts.nms_threshold, opts.roi_enabled ? "on" : "off");
     if (opts.roi_enabled) {
         fprintf(stderr, ":%u,%u,%u,%u", opts.roi_x, opts.roi_y, opts.roi_w, opts.roi_h);
+    }
+    if (opts.two_stage) {
+        fprintf(stderr,
+                " two_stage=on chip_conf=%.3f defect_conf=%.3f roi_margin=%.3f roi_smooth_alpha=%.3f roi_hold=%u chip_interval=%u defect_interval=%u defect_confirm=%u defect_hold=%u defect_smooth_alpha=%.3f defect_match_iou=%.3f defect_match_center=%.3f defect_class_decay=%.3f",
+                opts.chip_conf_threshold, opts.defect_conf_threshold, opts.roi_margin,
+                opts.roi_smooth_alpha, opts.roi_hold, opts.chip_interval, opts.defect_interval,
+                opts.defect_confirm, opts.defect_hold, opts.defect_smooth_alpha,
+                opts.defect_match_iou, opts.defect_match_center, opts.defect_class_decay);
+    }
+    if (opts.input_adjust_enabled) {
+        fprintf(stderr,
+                " input_adjust=on brightness=%d contrast=%.3f gamma=%.3f saturation=%.3f sharpness=%.3f adjust_file=%s",
+                opts.input_brightness, opts.input_contrast, opts.input_gamma,
+                opts.input_saturation, opts.input_sharpness, opts.input_adjust_file.c_str());
+    } else {
+        fprintf(stderr, " input_adjust=off");
     }
     fprintf(stderr, "\n");
 
@@ -1393,25 +2347,111 @@ int main(int argc, char **argv)
         }
         consecutive_mjpeg_errors = 0;
 
-        object_detect_result_list od_results;
-        memset(&od_results, 0, sizeof(od_results));
-        image_buffer_t infer_image;
-        uint32_t roi_offset_x = 0;
-        uint32_t roi_offset_y = 0;
-        if (!prepare_roi_rgb(opts, image, &roi_rgb_frame, &infer_image, &roi_offset_x, &roi_offset_y)) {
-            exit_code = 1;
-            queue_buffer(&camera, buf.index);
-            break;
+        if (image.format == IMAGE_FORMAT_RGB888) {
+            refresh_input_adjust_runtime(opts, &input_adjust);
+            apply_input_adjustment(image.virt_addr,
+                                   static_cast<uint32_t>(image.width),
+                                   static_cast<uint32_t>(image.height),
+                                   &input_adjust);
+            rgb_to_nv12(image.virt_addr,
+                        static_cast<uint32_t>(image.width),
+                        static_cast<uint32_t>(image.height),
+                        &frame);
+        } else if (opts.input_adjust_enabled && emitted == 0) {
+            fprintf(stderr, "input_adjust ignored for non-RGB888 input format=%d\n", image.format);
         }
 
-        const int infer_ret = inference_yolo11_model(&rknn_app_ctx, &infer_image, &od_results);
-        if (infer_ret != 0) {
-            fprintf(stderr, "inference_yolo11_model failed: ret=%d frame=%u\n", infer_ret, emitted);
-            exit_code = 1;
-            queue_buffer(&camera, buf.index);
-            break;
+        object_detect_result_list od_results;
+        memset(&od_results, 0, sizeof(od_results));
+        if (opts.two_stage) {
+            object_detect_result chip_box;
+            memset(&chip_box, 0, sizeof(chip_box));
+            bool have_chip_box = false;
+            const bool should_run_chip = !chip_box_state.has_box ||
+                                         opts.chip_interval <= 1 ||
+                                         (emitted % opts.chip_interval) == 0;
+            if (should_run_chip) {
+                object_detect_result_list chip_results;
+                memset(&chip_results, 0, sizeof(chip_results));
+                const int chip_ret = inference_yolo11_model(&rknn_app_ctx, &image, &chip_results);
+                if (chip_ret != 0) {
+                    fprintf(stderr, "chip inference failed: ret=%d frame=%u\n", chip_ret, emitted);
+                    exit_code = 1;
+                    queue_buffer(&camera, buf.index);
+                    break;
+                }
+
+                object_detect_result detected_chip_box;
+                memset(&detected_chip_box, 0, sizeof(detected_chip_box));
+                if (select_primary_chip(chip_results, &detected_chip_box)) {
+                    chip_box = smooth_chip_detection(&chip_box_state, detected_chip_box,
+                                                     opts.roi_smooth_alpha, opts.width, opts.height);
+                    have_chip_box = true;
+                } else if (hold_chip_detection(&chip_box_state, opts.roi_hold, &chip_box)) {
+                    have_chip_box = true;
+                }
+            } else if (reuse_chip_detection(chip_box_state, &chip_box)) {
+                have_chip_box = true;
+            }
+
+            if (have_chip_box) {
+                append_detection(&od_results, chip_box, 0, opts.width, opts.height);
+
+                const bool should_run_defect = !has_cached_defect_results ||
+                                               opts.defect_interval <= 1 ||
+                                               (emitted % opts.defect_interval) == 0;
+                if (should_run_defect) {
+                    image_buffer_t defect_image;
+                    uint32_t defect_offset_x = 0;
+                    uint32_t defect_offset_y = 0;
+                    if (!crop_rgb_rect(image, chip_box.box, opts.roi_margin,
+                                       &roi_rgb_frame, &defect_image,
+                                       &defect_offset_x, &defect_offset_y)) {
+                        exit_code = 1;
+                        queue_buffer(&camera, buf.index);
+                        break;
+                    }
+
+                    object_detect_result_list defect_results;
+                    memset(&defect_results, 0, sizeof(defect_results));
+                    const int defect_ret = inference_yolo11_model(&defect_app_ctx, &defect_image, &defect_results);
+                    if (defect_ret != 0) {
+                        fprintf(stderr, "defect inference failed: ret=%d frame=%u\n", defect_ret, emitted);
+                        exit_code = 1;
+                        queue_buffer(&camera, buf.index);
+                        break;
+                    }
+                    translate_results_from_roi(&defect_results, defect_offset_x, defect_offset_y,
+                                               opts.width, opts.height);
+                    defect_filter.update(defect_results, opts, opts.width, opts.height,
+                                         &cached_defect_results);
+                    has_cached_defect_results = true;
+                }
+                if (has_cached_defect_results) {
+                    for (int i = 0; i < cached_defect_results.count && i < OBJ_NUMB_MAX_SIZE; ++i) {
+                        append_detection(&od_results, cached_defect_results.results[i], 1, opts.width, opts.height);
+                    }
+                }
+            }
+        } else {
+            image_buffer_t infer_image;
+            uint32_t roi_offset_x = 0;
+            uint32_t roi_offset_y = 0;
+            if (!prepare_roi_rgb(opts, image, &roi_rgb_frame, &infer_image, &roi_offset_x, &roi_offset_y)) {
+                exit_code = 1;
+                queue_buffer(&camera, buf.index);
+                break;
+            }
+
+            const int infer_ret = inference_yolo11_model(&rknn_app_ctx, &infer_image, &od_results);
+            if (infer_ret != 0) {
+                fprintf(stderr, "inference_yolo11_model failed: ret=%d frame=%u\n", infer_ret, emitted);
+                exit_code = 1;
+                queue_buffer(&camera, buf.index);
+                break;
+            }
+            translate_results_from_roi(&od_results, roi_offset_x, roi_offset_y, opts.width, opts.height);
         }
-        translate_results_from_roi(&od_results, roi_offset_x, roi_offset_y, opts.width, opts.height);
 
         if (!write_frame_packet(stream_fd, opts.width, opts.height, emitted, od_results, frame)) {
             fprintf(stderr, "write stream failed: %s\n", strerror(errno));
@@ -1432,6 +2472,7 @@ out:
         stop_camera(&camera);
     }
     close_camera(&camera);
+    release_yolo11_model(&defect_app_ctx);
     release_yolo11_model(&rknn_app_ctx);
     if (post_process_ready) {
         deinit_post_process();

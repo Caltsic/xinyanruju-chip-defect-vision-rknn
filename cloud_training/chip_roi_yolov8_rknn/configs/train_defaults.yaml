@@ -1,0 +1,9 @@
+model: yolov8n.pt
+imgsz: 640
+epochs: 200
+batch: 64
+workers: 8
+patience: 50
+seed: 42
+calib_count: 300
+target_platform: rk3576

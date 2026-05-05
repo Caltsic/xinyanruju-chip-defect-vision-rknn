@@ -4,12 +4,12 @@ import subprocess
 from pathlib import PurePosixPath
 
 from tools.adb_imx415_rknn_live_view import (
-    CHIP_DEFECT_CLASSES,
     FpsMeter,
     ProtocolError,
     cleanup_remote_stream,
     focus_score,
     nv12_to_bgr,
+    profile_defaults,
     read_stream_frame,
     start_adb_stream,
     stop_adb_process,
@@ -23,7 +23,7 @@ class AdbRknnCamera:
     def __init__(self, settings: CameraSettings) -> None:
         self.settings = settings
         self.args = settings.to_namespace()
-        self.class_names = list(CHIP_DEFECT_CLASSES)
+        self.class_names = list(profile_defaults(settings.profile)[3])
         self.process: subprocess.Popen[bytes] | None = None
         self._fps_meter = FpsMeter()
         self.frames_seen = 0

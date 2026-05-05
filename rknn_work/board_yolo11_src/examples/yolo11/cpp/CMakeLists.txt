@@ -132,7 +132,7 @@ add_executable(rknn_chip_defect_camera_stream
 
 target_compile_definitions(rknn_chip_defect_camera_stream PRIVATE
     OBJ_CLASS_NUM=4
-    "DEFAULT_MODEL_PATH=\"model/chipcheck_yolov8_detect_int8.rknn\""
+    "DEFAULT_MODEL_PATH=\"model/chipcheck_yolov8_detect_split_int8.rknn\""
     "YOLO_LABEL_TXT_PATH=\"./model/chip_defect_labels.txt\""
     "LIVE_APP_NAME=\"RKNN chip defect\""
 )
@@ -167,7 +167,7 @@ add_executable(rknn_chip_defect_astra_stream
 
 target_compile_definitions(rknn_chip_defect_astra_stream PRIVATE
     OBJ_CLASS_NUM=4
-    "DEFAULT_MODEL_PATH=\"model/chipcheck_yolov8_detect_int8.rknn\""
+    "DEFAULT_MODEL_PATH=\"model/chipcheck_yolov8_detect_split_int8.rknn\""
     "YOLO_LABEL_TXT_PATH=\"./model/chip_defect_labels.txt\""
     "LIVE_APP_NAME=\"RKNN chip defect Astra\""
     "DEFAULT_DEVICE_PATH=\"/dev/video73\""
@@ -207,7 +207,7 @@ add_executable(rknn_chip_defect_maixcam_stream
 
 target_compile_definitions(rknn_chip_defect_maixcam_stream PRIVATE
     OBJ_CLASS_NUM=4
-    "DEFAULT_MODEL_PATH=\"model/chipcheck_yolov8_detect_int8.rknn\""
+    "DEFAULT_MODEL_PATH=\"model/chipcheck_yolov8_detect_split_int8.rknn\""
     "YOLO_LABEL_TXT_PATH=\"./model/chip_defect_labels.txt\""
     "LIVE_APP_NAME=\"RKNN chip defect MaixCAM\""
     "DEFAULT_DEVICE_PATH=\"/dev/video73\""
@@ -236,6 +236,126 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 target_include_directories(rknn_chip_defect_maixcam_stream PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LIBRKNNRT_INCLUDES}
+)
+
+add_executable(rknn_chip_roi_camera_stream
+    live_camera_yolo.cc
+    postprocess.cc
+    ${rknpu_yolo11_file}
+)
+
+target_compile_definitions(rknn_chip_roi_camera_stream PRIVATE
+    OBJ_CLASS_NUM=1
+    "DEFAULT_MODEL_PATH=\"model/chip_roi_yolov8_detect_split_int8.rknn\""
+    "YOLO_LABEL_TXT_PATH=\"./model/chip_roi_labels.txt\""
+    "LIVE_APP_NAME=\"RKNN chip ROI\""
+)
+
+target_link_libraries(rknn_chip_roi_camera_stream
+    imageutils
+    fileutils
+    ${LIBRKNNRT}
+    dl
+)
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    target_link_libraries(rknn_chip_roi_camera_stream
+    log
+)
+endif()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(rknn_chip_roi_camera_stream Threads::Threads)
+endif()
+
+target_include_directories(rknn_chip_roi_camera_stream PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LIBRKNNRT_INCLUDES}
+)
+
+add_executable(rknn_chip_roi_maixcam_stream
+    live_camera_yolo.cc
+    postprocess.cc
+    ${rknpu_yolo11_file}
+)
+
+target_compile_definitions(rknn_chip_roi_maixcam_stream PRIVATE
+    OBJ_CLASS_NUM=1
+    "DEFAULT_MODEL_PATH=\"model/chip_roi_yolov8_detect_split_int8.rknn\""
+    "YOLO_LABEL_TXT_PATH=\"./model/chip_roi_labels.txt\""
+    "LIVE_APP_NAME=\"RKNN chip ROI MaixCAM\""
+    "DEFAULT_DEVICE_PATH=\"/dev/video73\""
+    "DEFAULT_CAMERA_FORMAT=\"mjpg\""
+    DEFAULT_CAMERA_WIDTH=1280
+    DEFAULT_CAMERA_HEIGHT=720
+    DEFAULT_CAMERA_FPS=30
+    DEFAULT_CAMERA_SKIP=3
+)
+
+target_link_libraries(rknn_chip_roi_maixcam_stream
+    imageutils
+    fileutils
+    ${LIBRKNNRT}
+    dl
+)
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    target_link_libraries(rknn_chip_roi_maixcam_stream
+    log
+)
+endif()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(rknn_chip_roi_maixcam_stream Threads::Threads)
+endif()
+
+target_include_directories(rknn_chip_roi_maixcam_stream PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LIBRKNNRT_INCLUDES}
+)
+
+add_executable(rknn_chip_two_stage_maixcam_stream
+    live_camera_yolo.cc
+    postprocess.cc
+    ${rknpu_yolo11_file}
+)
+
+target_compile_definitions(rknn_chip_two_stage_maixcam_stream PRIVATE
+    OBJ_CLASS_NUM=5
+    ENABLE_TWO_STAGE
+    DEFAULT_TWO_STAGE=1
+    "DEFAULT_MODEL_PATH=\"model/chip_roi_yolov8_detect_split_int8.rknn\""
+    "DEFAULT_DEFECT_MODEL_PATH=\"model/chipcheck_yolov8_detect_split_int8.rknn\""
+    "YOLO_LABEL_TXT_PATH=\"./model/chip_roi_labels.txt\""
+    "LIVE_APP_NAME=\"RKNN chip two-stage MaixCAM\""
+    "DEFAULT_DEVICE_PATH=\"/dev/video73\""
+    "DEFAULT_CAMERA_FORMAT=\"mjpg\""
+    DEFAULT_CAMERA_WIDTH=1280
+    DEFAULT_CAMERA_HEIGHT=720
+    DEFAULT_CAMERA_FPS=30
+    DEFAULT_CAMERA_SKIP=3
+)
+
+target_link_libraries(rknn_chip_two_stage_maixcam_stream
+    imageutils
+    fileutils
+    ${LIBRKNNRT}
+    dl
+)
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    target_link_libraries(rknn_chip_two_stage_maixcam_stream
+    log
+)
+endif()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(rknn_chip_two_stage_maixcam_stream Threads::Threads)
+endif()
+
+target_include_directories(rknn_chip_two_stage_maixcam_stream PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${LIBRKNNRT_INCLUDES}
 )
@@ -285,10 +405,16 @@ install(TARGETS rknn_yolo11_camera_stream DESTINATION .)
 install(TARGETS rknn_chip_defect_camera_stream DESTINATION .)
 install(TARGETS rknn_chip_defect_astra_stream DESTINATION .)
 install(TARGETS rknn_chip_defect_maixcam_stream DESTINATION .)
+install(TARGETS rknn_chip_roi_camera_stream DESTINATION .)
+install(TARGETS rknn_chip_roi_maixcam_stream DESTINATION .)
+install(TARGETS rknn_chip_two_stage_maixcam_stream DESTINATION .)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../model/bus.jpg DESTINATION model)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../model/coco_80_labels_list.txt DESTINATION model)
 if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../model/chip_defect_labels.txt)
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../model/chip_defect_labels.txt DESTINATION model)
+endif()
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../model/chip_roi_labels.txt)
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../model/chip_roi_labels.txt DESTINATION model)
 endif()
 file(GLOB RKNN_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/*.rknn")
 install(FILES ${RKNN_FILES} DESTINATION model)

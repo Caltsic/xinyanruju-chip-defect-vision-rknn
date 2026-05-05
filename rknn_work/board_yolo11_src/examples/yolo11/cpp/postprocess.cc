@@ -529,9 +529,42 @@ static float yolov8_tensor_value(uint8_t *tensor, int offset, int32_t zp, float 
     return deqnt_affine_u8_to_f32(tensor[offset], zp, scale);
 }
 
+static bool yolov8_parse_shape(rknn_tensor_attr *attr, int expected_channels,
+                               int *channels, int *anchors, bool *channel_first)
+{
+    if (attr->n_dims >= 3 && attr->dims[1] == expected_channels)
+    {
+        *channels = attr->dims[1];
+        *anchors = attr->dims[2];
+        *channel_first = true;
+        return true;
+    }
+    if (attr->n_dims >= 3 && attr->dims[2] == expected_channels)
+    {
+        *channels = attr->dims[2];
+        *anchors = attr->dims[1];
+        *channel_first = false;
+        return true;
+    }
+    return false;
+}
+
+static float yolov8_tensor_value_by_attr(void *tensor, rknn_tensor_attr *attr, int offset)
+{
+    if (attr->type == RKNN_TENSOR_INT8)
+    {
+        return deqnt_affine_to_f32(((int8_t *)tensor)[offset], attr->zp, attr->scale);
+    }
+    if (attr->type == RKNN_TENSOR_UINT8)
+    {
+        return deqnt_affine_u8_to_f32(((uint8_t *)tensor)[offset], attr->zp, attr->scale);
+    }
+    return ((float *)tensor)[offset];
+}
+
 template <typename T>
 static int process_yolov8_one_output(T *tensor, int32_t zp, float scale,
-                                     int channels, int anchors, bool channel_first,
+                                     int channels, int anchors, bool channel_first, int class_count,
                                      std::vector<float> &boxes,
                                      std::vector<float> &objProbs,
                                      std::vector<int> &classId,
@@ -542,7 +575,7 @@ static int process_yolov8_one_output(T *tensor, int32_t zp, float scale,
     {
         int max_class_id = -1;
         float max_score = 0.0f;
-        for (int c = 0; c < OBJ_CLASS_NUM; ++c)
+        for (int c = 0; c < class_count; ++c)
         {
             int offset = yolov8_output_offset(4 + c, anchor, channels, anchors, channel_first);
             float score = yolov8_tensor_value(tensor, offset, zp, scale);
@@ -580,6 +613,60 @@ static int process_yolov8_one_output(T *tensor, int32_t zp, float scale,
     return validCount;
 }
 
+static int process_yolov8_split_outputs(void *box_tensor, rknn_tensor_attr *box_attr,
+                                        int box_channels, int anchors, bool box_channel_first,
+                                        void *score_tensor, rknn_tensor_attr *score_attr,
+                                        int score_channels, bool score_channel_first, int class_count,
+                                        std::vector<float> &boxes,
+                                        std::vector<float> &objProbs,
+                                        std::vector<int> &classId,
+                                        float threshold)
+{
+    int validCount = 0;
+    for (int anchor = 0; anchor < anchors; ++anchor)
+    {
+        int max_class_id = -1;
+        float max_score = 0.0f;
+        for (int c = 0; c < class_count; ++c)
+        {
+            int offset = yolov8_output_offset(c, anchor, score_channels, anchors, score_channel_first);
+            float score = yolov8_tensor_value_by_attr(score_tensor, score_attr, offset);
+            if (score > max_score)
+            {
+                max_score = score;
+                max_class_id = c;
+            }
+        }
+
+        if (max_class_id < 0 || max_score <= threshold)
+        {
+            continue;
+        }
+
+        float cx = yolov8_tensor_value_by_attr(box_tensor, box_attr,
+                                               yolov8_output_offset(0, anchor, box_channels, anchors, box_channel_first));
+        float cy = yolov8_tensor_value_by_attr(box_tensor, box_attr,
+                                               yolov8_output_offset(1, anchor, box_channels, anchors, box_channel_first));
+        float w = yolov8_tensor_value_by_attr(box_tensor, box_attr,
+                                              yolov8_output_offset(2, anchor, box_channels, anchors, box_channel_first));
+        float h = yolov8_tensor_value_by_attr(box_tensor, box_attr,
+                                              yolov8_output_offset(3, anchor, box_channels, anchors, box_channel_first));
+        if (!isfinite(cx) || !isfinite(cy) || !isfinite(w) || !isfinite(h) || w <= 0.0f || h <= 0.0f)
+        {
+            continue;
+        }
+
+        boxes.push_back(cx - w * 0.5f);
+        boxes.push_back(cy - h * 0.5f);
+        boxes.push_back(w);
+        boxes.push_back(h);
+        objProbs.push_back(max_score > 1.0f ? 1.0f : max_score);
+        classId.push_back(max_class_id);
+        validCount++;
+    }
+    return validCount;
+}
+
 int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter_box, float conf_threshold, float nms_threshold, object_detect_result_list *od_results)
 {
 #if defined(RV1106_1103) 
@@ -596,6 +683,7 @@ int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter
     int grid_w = 0;
     int model_in_w = app_ctx->model_width;
     int model_in_h = app_ctx->model_height;
+    const int class_count = app_ctx->class_count > 0 ? app_ctx->class_count : OBJ_CLASS_NUM;
 
     memset(od_results, 0, sizeof(object_detect_result_list));
 
@@ -606,23 +694,11 @@ int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter
         int anchors = 0;
         bool channel_first = true;
 
-        if (attr->n_dims >= 3 && attr->dims[1] == OBJ_CLASS_NUM + 4)
+        if (!yolov8_parse_shape(attr, class_count + 4, &channels, &anchors, &channel_first))
         {
-            channels = attr->dims[1];
-            anchors = attr->dims[2];
-            channel_first = true;
-        }
-        else if (attr->n_dims >= 3 && attr->dims[2] == OBJ_CLASS_NUM + 4)
-        {
-            channels = attr->dims[2];
-            anchors = attr->dims[1];
-            channel_first = false;
-        }
-        else
-        {
-            printf("unsupported YOLOv8 output shape: n_dims=%d dims=[%d, %d, %d, %d], expected channel count %d\n",
+            printf("unsupported single-output YOLOv8 shape: n_dims=%d dims=[%d, %d, %d, %d], expected channel count %d\n",
                    attr->n_dims, attr->dims[0], attr->dims[1], attr->dims[2], attr->dims[3],
-                   OBJ_CLASS_NUM + 4);
+                   class_count + 4);
             return -1;
         }
 
@@ -633,21 +709,55 @@ int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter
         if (attr->type == RKNN_TENSOR_INT8)
         {
             validCount += process_yolov8_one_output((int8_t *)_outputs[0].buf, attr->zp, attr->scale,
-                                                    channels, anchors, channel_first,
+                                                    channels, anchors, channel_first, class_count,
                                                     filterBoxes, objProbs, classId, conf_threshold);
         }
         else if (attr->type == RKNN_TENSOR_UINT8)
         {
             validCount += process_yolov8_one_output((uint8_t *)_outputs[0].buf, attr->zp, attr->scale,
-                                                    channels, anchors, channel_first,
+                                                    channels, anchors, channel_first, class_count,
                                                     filterBoxes, objProbs, classId, conf_threshold);
         }
         else
         {
             validCount += process_yolov8_one_output((float *)_outputs[0].buf, attr->zp, attr->scale,
-                                                    channels, anchors, channel_first,
+                                                    channels, anchors, channel_first, class_count,
                                                     filterBoxes, objProbs, classId, conf_threshold);
         }
+#endif
+    }
+    else if (app_ctx->io_num.n_output == 2)
+    {
+#if defined(RV1106_1103)
+        printf("split-output YOLOv8 postprocess is not implemented for RV1106/1103 zero-copy path\n");
+        return -1;
+#else
+        rknn_tensor_attr *box_attr = &app_ctx->output_attrs[0];
+        rknn_tensor_attr *score_attr = &app_ctx->output_attrs[1];
+        int box_channels = 0;
+        int box_anchors = 0;
+        int score_channels = 0;
+        int score_anchors = 0;
+        bool box_channel_first = true;
+        bool score_channel_first = true;
+
+        bool box_ok = yolov8_parse_shape(box_attr, 4, &box_channels, &box_anchors, &box_channel_first);
+        bool score_ok = yolov8_parse_shape(score_attr, class_count, &score_channels, &score_anchors, &score_channel_first);
+        if (!box_ok || !score_ok || box_anchors != score_anchors)
+        {
+            printf("unsupported split-output YOLOv8 shapes: box n_dims=%d dims=[%d, %d, %d, %d], "
+                   "score n_dims=%d dims=[%d, %d, %d, %d], expected box channels 4 and score channels %d\n",
+                   box_attr->n_dims, box_attr->dims[0], box_attr->dims[1], box_attr->dims[2], box_attr->dims[3],
+                   score_attr->n_dims, score_attr->dims[0], score_attr->dims[1], score_attr->dims[2], score_attr->dims[3],
+                   class_count);
+            return -1;
+        }
+
+        validCount += process_yolov8_split_outputs(_outputs[0].buf, box_attr,
+                                                   box_channels, box_anchors, box_channel_first,
+                                                   _outputs[1].buf, score_attr,
+                                                   score_channels, score_channel_first, class_count,
+                                                   filterBoxes, objProbs, classId, conf_threshold);
 #endif
     }
     else

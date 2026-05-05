@@ -31,6 +31,35 @@ static void dump_tensor_attr(rknn_tensor_attr *attr)
            get_qnt_type_string(attr->qnt_type), attr->zp, attr->scale);
 }
 
+static int infer_yolov8_class_count(rknn_input_output_num io_num, rknn_tensor_attr *output_attrs)
+{
+    if (io_num.n_output == 1)
+    {
+        rknn_tensor_attr *attr = &output_attrs[0];
+        if (attr->n_dims >= 3 && attr->dims[1] > 4)
+        {
+            return attr->dims[1] - 4;
+        }
+        if (attr->n_dims >= 3 && attr->dims[2] > 4)
+        {
+            return attr->dims[2] - 4;
+        }
+    }
+    if (io_num.n_output == 2)
+    {
+        rknn_tensor_attr *score_attr = &output_attrs[1];
+        if (score_attr->n_dims >= 3 && score_attr->dims[1] > 0 && score_attr->dims[1] < 1024)
+        {
+            return score_attr->dims[1];
+        }
+        if (score_attr->n_dims >= 3 && score_attr->dims[2] > 0 && score_attr->dims[2] < 1024)
+        {
+            return score_attr->dims[2];
+        }
+    }
+    return OBJ_CLASS_NUM;
+}
+
 int init_yolo11_model(const char *model_path, rknn_app_context_t *app_ctx)
 {
     int ret;
@@ -131,6 +160,8 @@ int init_yolo11_model(const char *model_path, rknn_app_context_t *app_ctx)
     }
     printf("model input height=%d, width=%d, channel=%d\n",
            app_ctx->model_height, app_ctx->model_width, app_ctx->model_channel);
+    app_ctx->class_count = infer_yolov8_class_count(io_num, app_ctx->output_attrs);
+    printf("model class count=%d\n", app_ctx->class_count);
 
     return 0;
 }
@@ -225,7 +256,9 @@ int inference_yolo11_model(rknn_app_context_t *app_ctx, image_buffer_t *img, obj
     for (int i = 0; i < app_ctx->io_num.n_output; i++)
     {
         outputs[i].index = i;
-        outputs[i].want_float = (!app_ctx->is_quant);
+        outputs[i].want_float = (!app_ctx->is_quant ||
+                                  (app_ctx->output_attrs[i].type != RKNN_TENSOR_INT8 &&
+                                   app_ctx->output_attrs[i].type != RKNN_TENSOR_UINT8));
     }
     ret = rknn_outputs_get(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs, NULL);
     if (ret < 0)

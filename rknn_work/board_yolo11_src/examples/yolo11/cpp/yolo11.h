@@ -46,6 +46,7 @@ typedef struct {
     int model_channel;
     int model_width;
     int model_height;
+    int class_count;
     bool is_quant;
     float box_conf_threshold;
     float nms_threshold;

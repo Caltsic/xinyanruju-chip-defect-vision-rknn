@@ -1,0 +1,12 @@
+{
+  "python": "3.12.3 | packaged by Anaconda, Inc. | (main, May  6 2024, 19:46:43) [GCC 11.2.0]",
+  "platform": "Linux-5.15.0-94-generic-x86_64-with-glibc2.35",
+  "rknn_toolkit2": "2.3.2",
+  "target_platform": "rk3576",
+  "onnx": "/root/autodl-tmp/chipcheck_split_convert_20260504/chipcheck_yolov8_detect_split.onnx",
+  "calib_dataset": "/root/autodl-tmp/chipcheck_split_convert_20260504/calib_dataset.txt",
+  "outputs": {
+    "fp": "/root/autodl-tmp/chipcheck_split_convert_20260504/outputs/rknn_split/chipcheck_yolov8_detect_split_fp.rknn",
+    "int8": "/root/autodl-tmp/chipcheck_split_convert_20260504/outputs/rknn_split/chipcheck_yolov8_detect_split_int8.rknn"
+  }
+}
