@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import PurePosixPath
+from typing import Protocol
 
 from tools.adb_imx415_rknn_live_view import (
     FpsMeter,
     ProtocolError,
+    build_remote_command,
     cleanup_remote_stream,
     focus_score,
+    input_adjust_config_text,
     nv12_to_bgr,
     profile_defaults,
     read_stream_frame,
+    run_adb_shell,
     start_adb_stream,
     stop_adb_process,
 )
@@ -19,21 +24,31 @@ from .models import CameraFrame
 from .settings import CameraSettings
 
 
-class AdbRknnCamera:
-    def __init__(self, settings: CameraSettings) -> None:
-        self.settings = settings
-        self.args = settings.to_namespace()
-        self.class_names = list(profile_defaults(settings.profile)[3])
-        self.process: subprocess.Popen[bytes] | None = None
-        self._fps_meter = FpsMeter()
-        self.frames_seen = 0
-        self.last_stderr = ""
+class RknnCamera(Protocol):
+    frames_seen: int
+    last_stderr: str
 
     def start(self) -> None:
-        self.stop()
-        self.process = start_adb_stream(self.args)
-        self.frames_seen = 0
-        self.last_stderr = ""
+        ...
+
+    def read_frame(self) -> CameraFrame | None:
+        ...
+
+    def stop(self) -> None:
+        ...
+
+    def remote_log_tail(self, lines: int = 20) -> str:
+        ...
+
+    def preflight(self) -> dict[str, bool]:
+        ...
+
+
+class _FrameReaderMixin:
+    process: subprocess.Popen[bytes] | None
+    settings: CameraSettings
+    _fps_meter: FpsMeter
+    frames_seen: int
 
     def read_frame(self) -> CameraFrame | None:
         if self.process is None or self.process.stdout is None:
@@ -54,6 +69,23 @@ class AdbRknnCamera:
             fps=fps,
             focus=focus,
         )
+
+
+class AdbRknnCamera(_FrameReaderMixin):
+    def __init__(self, settings: CameraSettings) -> None:
+        self.settings = settings
+        self.args = settings.to_namespace()
+        self.class_names = list(profile_defaults(settings.profile)[3])
+        self.process: subprocess.Popen[bytes] | None = None
+        self._fps_meter = FpsMeter()
+        self.frames_seen = 0
+        self.last_stderr = ""
+
+    def start(self) -> None:
+        self.stop()
+        self.process = start_adb_stream(self.args)
+        self.frames_seen = 0
+        self.last_stderr = ""
 
     def stop(self) -> None:
         if self.process is not None:
@@ -97,11 +129,107 @@ class AdbRknnCamera:
         return checks
 
 
+class LocalRknnCamera(_FrameReaderMixin):
+    def __init__(self, settings: CameraSettings) -> None:
+        self.settings = settings
+        self.args = settings.to_namespace()
+        self.class_names = list(profile_defaults(settings.profile)[3])
+        self.process: subprocess.Popen[bytes] | None = None
+        self._fps_meter = FpsMeter()
+        self.frames_seen = 0
+        self.last_stderr = ""
+
+    def start(self) -> None:
+        self.stop()
+        self.process = subprocess.Popen(
+            ["sh", "-c", build_remote_command(self.args)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        self.frames_seen = 0
+        self.last_stderr = ""
+
+    def stop(self) -> None:
+        if self.process is not None:
+            self.last_stderr = stop_adb_process(self.process)
+            self.process = None
+        self._cleanup_local_stream()
+
+    def remote_log_tail(self, lines: int = 20) -> str:
+        command = ["sh", "-c", f"tail -n {int(lines)} {shlex.quote(self.settings.remote_log)} 2>/dev/null || true"]
+        try:
+            result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False)
+        except Exception as exc:  # noqa: BLE001 - diagnostic path
+            return str(exc)
+        text = result.stdout.strip()
+        if not text and result.stderr.strip():
+            text = result.stderr.strip()
+        return text
+
+    def preflight(self) -> dict[str, bool]:
+        binary_name = PurePosixPath(self.settings.remote_binary).name
+        script = (
+            f"test -e {shlex.quote(self.settings.device)}; echo camera=$?; "
+            f"test -x {shlex.quote(self.settings.remote_workdir)}/{shlex.quote(binary_name)}; echo stream=$?; "
+            "test -e /dev/spidev1.0; echo spidev=$?"
+        )
+        result = subprocess.run(["sh", "-c", script], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False)
+        checks = {"camera": False, "stream": False, "spidev": False}
+        for line in result.stdout.splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.strip().split("=", 1)
+            if key in checks:
+                checks[key] = value == "0"
+        return checks
+
+    def _cleanup_local_stream(self) -> None:
+        binary_name = PurePosixPath(self.settings.remote_binary).name
+        try:
+            subprocess.run(
+                ["sh", "-c", f"pkill -f {shlex.quote(binary_name)} 2>/dev/null || true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=False,
+            )
+        except Exception:
+            pass
+
+
 class CameraStreamError(RuntimeError):
     pass
 
 
-def format_stream_error(camera: AdbRknnCamera, exc: BaseException | None = None) -> str:
+def create_camera(settings: CameraSettings) -> RknnCamera:
+    if settings.backend == "local":
+        return LocalRknnCamera(settings)
+    if settings.backend == "adb":
+        return AdbRknnCamera(settings)
+    raise ValueError(f"unsupported camera backend: {settings.backend}")
+
+
+def write_input_adjust_config(settings: CameraSettings) -> None:
+    args = settings.to_namespace()
+    text = input_adjust_config_text(args)
+    if settings.backend == "local":
+        path = settings.input_adjust_file
+        command = ["sh", "-c", f"cat > {shlex.quote(path)} <<'EOF'\n{text}EOF"]
+        result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout).strip() or "input adjust setup failed")
+        return
+    if settings.backend == "adb":
+        script = f"cat > {shlex.quote(args.input_adjust_file)} <<'EOF'\n{text}EOF"
+        result = run_adb_shell(args, script, 5.0)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout).strip() or "input adjust setup failed")
+        return
+    raise ValueError(f"unsupported camera backend: {settings.backend}")
+
+
+def format_stream_error(camera: RknnCamera, exc: BaseException | None = None) -> str:
     parts: list[str] = []
     if exc is not None and not isinstance(exc, ProtocolError):
         parts.append(str(exc))

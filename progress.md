@@ -524,6 +524,84 @@ display_max_defects=3
 - 已新增历史归档：
   - `history/026-chip_capture_gui_two_stage_live_tuning.md`
 
+## 2026-05-05 IMX678 USB UVC 接入
+
+- 新 IMX678 模组已通过 USB 接入板端，系统识别为 UVC 设备：
+
+```text
+Bus 001 Device 004: ID 1bcf:2cd1 Sunplus Innovation Technology Inc. DECXIN CAMERA
+/dev/video73  DECXIN CAMERA: DECXIN CAMERA
+/dev/video74  UVC metadata
+```
+
+- `/dev/video73` 支持 `MJPG 1280x720 @ 60`、`1920x1080 @ 60`、`3840x2160 @ 30` 等格式；当前实时检测仍建议先用 `MJPG 1280x720`。
+- 已新增正式 profile：
+  - `chip-defect-imx678`
+  - `chip-roi-imx678`
+  - `chip-two-stage-imx678`
+- `tools/chip_capture_gui/settings.py` 默认 profile 已切到 `chip-two-stage-imx678`。
+- 板端 `/userdata/chipcheck_vision` 已同步更新相关 Python 代码。
+- 验证命令：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-imx678 --frames 20 --headless --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20 --save-snapshot .\captures\imx678_profile_two_stage_annotated.jpg --save-clean-snapshot .\captures\imx678_profile_two_stage_clean.jpg --remote-log /tmp/imx678_profile_two_stage.log
+```
+
+- 结果：`Processed frames: 20`，约 `8 FPS`，`det=2/2`，输出 `chip 0.63` 和 `broken 0.74`。
+- 当前画面明显虚焦，`focus` 约 `3`；后续优先调镜头/工作距离或 UVC focus 控制。
+- 归档：
+  - `history/030-imx678_usb_uvc_realtime_profile.md`
+
+## 2026-05-05 chip_capture_gui 双后端与板端 OpenCV 界面
+
+- 用户要求把完整 `chip_capture_gui` 改为双后端：PC 端继续走 ADB，板端走本地进程，并重写一个 OpenCV 简化交互版。
+- 已完成：
+  - `CameraSettings.backend`，默认 `adb`。
+  - `AdbRknnCamera` / `LocalRknnCamera` 双相机后端。
+  - `AdbWs2812Controller` / `LocalWs2812Controller` 双补光后端。
+  - `write_input_adjust_config()` 同时支持 ADB 和本地写入 `/tmp/chip_input_adjust.conf`。
+  - `tools/chip_capture_gui/opencv_app.py`：OpenCV 简化界面，支持实时检测、调参预设、Capture ROI、W/A/S/D/+- 复核、Enter 接受、Delete/N 负样本。
+  - `python -m tools.chip_capture_gui --opencv` 进入 OpenCV 界面；缺少 PyQt5 时自动 fallback 到 OpenCV。
+- 板端已同步到：
+
+```text
+/userdata/chipcheck_vision/tools
+```
+
+- 板端本地后端 3 帧烟测通过，直接启动二阶段 MaixCAM 流，读到 `1280x720` 帧，preflight 显示 camera/stream/spidev 均为 true。
+- OpenCV HDMI 窗口短跑通过，退出后无残留推理进程；已补 OpenCV QT 字体链接，消除启动字体警告。
+- 当前板端启动命令：
+
+```bash
+cd /userdata/chipcheck_vision
+python3 -m tools.chip_capture_gui --opencv --backend local --fullscreen
+```
+
+- 已安装板端桌面快捷方式：
+
+```text
+/home/lckfb/Desktop/chipcheck-hdmi.desktop
+/usr/share/applications/chipcheck-hdmi.desktop
+/usr/local/bin/chipcheck-hdmi-gui
+```
+
+- 已把快捷方式模板加入仓库：
+  - `board/desktop/chipcheck-hdmi-gui`
+  - `board/desktop/chipcheck-hdmi.desktop`
+  - `board/desktop/99-chipcheck-spidev.rules`
+- 为桌面用户补齐 `/dev/spidev1.0` 权限：
+  - 当前权限：`root:plugdev 0660`
+  - udev 规则：`/etc/udev/rules.d/99-chipcheck-spidev.rules`
+- 已用 `gio launch` 模拟桌面点击，确认能启动 OpenCV 本地后端和二阶段流；测试后已清理残留进程并恢复补光。
+- 用户反馈桌面启动后全屏画面被 7 寸屏裁切、看不到退出入口；已处理：
+  - 立即通过 ADB 停止 `chip_capture_gui` 和 `rknn_chip_two_stage_maixcam_stream`。
+  - `opencv_app.py` 新增 `--window-x/--window-y`，非全屏模式会把窗口移到左上角。
+  - `/usr/local/bin/chipcheck-hdmi-gui` 改为 `--screen-width 960 --screen-height 540 --window-x 0 --window-y 0`，不再默认 `--fullscreen`。
+  - 已重新 push 到 `/userdata/chipcheck_vision/tools/chip_capture_gui/opencv_app.py` 和 `/usr/local/bin/chipcheck-hdmi-gui`。
+
+- 归档：
+  - `history/029-chip_capture_gui_dual_backend_opencv_board_ui.md`
+
 ## 2026-05-05 板端 NPU 输入与显示画面一致
 
 - 用户要求 MaixCAM 链路改为：`MJPG -> 板端解码 RGB888 -> 板端应用同一套图像调整参数 -> 调整后的 RGB888 给 chip ROI / defect NPU -> 调整后的画面回传 PC 显示`。

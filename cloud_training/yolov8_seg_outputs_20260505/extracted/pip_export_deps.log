@@ -1,0 +1,25 @@
+Looking in indexes: http://mirrors.aliyun.com/pypi/simple
+Collecting onnxscript
+  Downloading onnxscript-0.7.0-py3-none-any.whl (714 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 714.8/714.8 kB 2.3 MB/s  0:00:00
+Collecting onnxslim
+  Downloading onnxslim-0.1.92-py3-none-any.whl (237 kB)
+Requirement already satisfied: ml_dtypes in /root/miniconda3/lib/python3.12/site-packages (from onnxscript) (0.5.4)
+Requirement already satisfied: numpy in /root/miniconda3/lib/python3.12/site-packages (from onnxscript) (1.26.4)
+Collecting onnx_ir<2,>=0.1.16 (from onnxscript)
+  Downloading onnx_ir-0.2.1-py3-none-any.whl (166 kB)
+Requirement already satisfied: onnx>=1.17 in /root/miniconda3/lib/python3.12/site-packages (from onnxscript) (1.21.0)
+Requirement already satisfied: packaging in /root/miniconda3/lib/python3.12/site-packages (from onnxscript) (26.2)
+Requirement already satisfied: typing_extensions>=4.10 in /root/miniconda3/lib/python3.12/site-packages (from onnxscript) (4.15.0)
+Requirement already satisfied: sympy>=1.13 in /root/miniconda3/lib/python3.12/site-packages (from onnx_ir<2,>=0.1.16->onnxscript) (1.14.0)
+Collecting colorama (from onnxslim)
+  Downloading colorama-0.4.6-py2.py3-none-any.whl (25 kB)
+Requirement already satisfied: protobuf>=4.25.1 in /root/miniconda3/lib/python3.12/site-packages (from onnx>=1.17->onnxscript) (4.25.4)
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in /root/miniconda3/lib/python3.12/site-packages (from sympy>=1.13->onnx_ir<2,>=0.1.16->onnxscript) (1.3.0)
+Installing collected packages: colorama, onnxslim, onnx_ir, onnxscript
+
+Successfully installed colorama-0.4.6 onnx_ir-0.2.1 onnxscript-0.7.0 onnxslim-0.1.92
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+
+[notice] A new release of pip is available: 26.1 -> 26.1.1
+[notice] To update, run: /root/miniconda3/bin/python -m pip install --upgrade pip

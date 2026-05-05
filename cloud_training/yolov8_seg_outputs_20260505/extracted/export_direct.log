@@ -1,0 +1,47 @@
+Rockchip export failed, falling back to standard ultralytics export: Rockchip ultralytics fork not found: /root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/third_party/ultralytics_yolov8. Pass --auto-clone or clone https://github.com/airockchip/ultralytics_yolov8.git first.
+Ultralytics YOLOv8.2.82 🚀 Python-3.12.3 torch-2.11.0+cu128 CPU (Intel Xeon Platinum 8470Q)
+YOLOv8n-seg summary (fused): 195 layers, 3,258,844 parameters, 0 gradients, 11.3 GFLOPs
+
+[34m[1mPyTorch:[0m starting from '/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/chipcheck_yolov8_seg.pt' with input shape (1, 3, 640, 640) BCHW and output shape(s) ((1, 40, 8400), (1, 32, 160, 160)) (6.5 MB)
+
+[34m[1mONNX:[0m starting export with onnx 1.21.0 opset 12...
+W0505 23:01:51.854000 4012 site-packages/torch/onnx/_internal/exporter/_compat.py:133] Setting ONNX exporter to use operator set version 18 because the requested opset_version 12 is a lower version than we have implementations for. Automatic version conversion will be performed, which may not be successful at converting to the requested version. If version conversion is unsuccessful, the opset version of the exported model will be kept at 18. Please consider setting opset_version >=18 to leverage latest ONNX features
+/root/miniconda3/lib/python3.12/copyreg.py:99: FutureWarning: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
+  return cls.__new__(cls, *args)
+The model version conversion is not supported by the onnxscript version converter and fallback is enabled. The model will be converted using the onnx C API (target version: 12).
+Failed to convert the model to the target version 12 using the ONNX C API. The model was not modified
+Traceback (most recent call last):
+  File "/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/scripts/export_onnx.py", line 117, in main
+    exported = export_with_rockchip(args)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/scripts/export_onnx.py", line 75, in export_with_rockchip
+    ensure_rockchip_repo(repo, args.auto_clone)
+  File "/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/scripts/export_onnx.py", line 40, in ensure_rockchip_repo
+    raise FileNotFoundError(
+FileNotFoundError: Rockchip ultralytics fork not found: /root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/third_party/ultralytics_yolov8. Pass --auto-clone or clone https://github.com/airockchip/ultralytics_yolov8.git first.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/miniconda3/lib/python3.12/site-packages/onnxscript/version_converter/__init__.py", line 137, in call
+    converted_proto = _c_api_utils.call_onnx_api(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/lib/python3.12/site-packages/onnxscript/version_converter/_c_api_utils.py", line 65, in call_onnx_api
+    result = func(proto)
+             ^^^^^^^^^^^
+  File "/root/miniconda3/lib/python3.12/site-packages/onnxscript/version_converter/__init__.py", line 132, in _partial_convert_version
+    return onnx.version_converter.convert_version(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/lib/python3.12/site-packages/onnx/version_converter.py", line 39, in convert_version
+    converted_model_str = C.convert_version(model_str, target_version)
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: /github/workspace/onnx/version_converter/BaseConverter.h:64: adapter_lookup: Assertion `false` failed: No Adapter To Version $17 for Resize
+[34m[1mONNX:[0m slimming with onnxslim 0.1.92...
+[34m[1mONNX:[0m export success ✅ 3.8s, saved as '/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/chipcheck_yolov8_seg.onnx' (12.6 MB)
+
+Export complete (5.4s)
+Results saved to [1m/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final[0m
+Predict:         yolo predict task=segment model=/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/chipcheck_yolov8_seg.onnx imgsz=640  
+Validate:        yolo val task=segment model=/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/chipcheck_yolov8_seg.onnx imgsz=640 data=/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/dataset_yolov8_seg/data.yaml  
+Visualize:       https://netron.app
+ONNX: /root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/chipcheck_yolov8_seg.onnx

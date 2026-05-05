@@ -1,0 +1,14 @@
+{
+  "python": "3.12.3 | packaged by Anaconda, Inc. | (main, May  6 2024, 19:46:43) [GCC 11.2.0]",
+  "platform": "Linux-5.15.0-94-generic-x86_64-with-glibc2.35",
+  "rknn_toolkit2": "2.3.2",
+  "target_platform": "rk3576",
+  "onnx_requested": "/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/chipcheck_yolov8_seg.onnx",
+  "onnx_used": "/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/chipcheck_yolov8_seg_split.onnx",
+  "using_split_onnx": true,
+  "calib_dataset": "/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/calib_dataset.txt",
+  "outputs": {
+    "fp": "/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/rknn/chipcheck_yolov8_seg_fp.rknn",
+    "int8": "/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/rknn/chipcheck_yolov8_seg_split_int8.rknn"
+  }
+}

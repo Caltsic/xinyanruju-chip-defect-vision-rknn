@@ -6,13 +6,30 @@ Run from the project root:
 F:\anaconda\python.exe -m tools.chip_capture_gui
 ```
 
-The GUI is now the preferred path for real chip ROI capture, quick labeling,
-and two-stage live observation.
+The default PC GUI is PyQt5 based and keeps using the ADB backend. It is the
+preferred path for real chip ROI capture, quick labeling, and two-stage live
+observation from Windows.
+
+OpenCV simplified interface:
+
+```powershell
+F:\anaconda\python.exe -m tools.chip_capture_gui --opencv --backend adb
+```
+
+Board-local HDMI interface:
+
+```bash
+cd /userdata/chipcheck_vision
+python3 -m tools.chip_capture_gui --opencv --backend local --fullscreen
+```
+
+The board-local backend starts the stream binary directly on TaishanPi and does
+not use ADB `exec-out` for frames.
 
 Default live stream:
 
 ```text
-chip-two-stage-maixcam
+chip-two-stage-imx678
 chip_conf=0.25
 defect_conf=0.45
 defect_confirm=3
@@ -22,7 +39,7 @@ display_max_defects=20
 This is equivalent to the current command-line live view:
 
 ```powershell
-F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
 ```
 
 Default output:
@@ -89,6 +106,21 @@ A/D/W/S  move the current chip box
 Enter    accept the current box
 Delete   mark the frame as a negative sample
 Esc/q    not used for saving; close the window normally
+```
+
+OpenCV interface controls:
+
+```text
+Tab       select Brightness / Contrast / Gamma / Saturation / Sharpness / Light
++/-       adjust selected value in live mode; scale ROI in review mode
+1/2/3/0   Pins / Text / Damage / Reset presets
+C         capture current frame and enter ROI review
+O         toggle detection boxes
+I         toggle board-side input-adjust sync
+A/D/W/S   move ROI in review mode
+Enter     accept ROI
+Delete/N  mark negative
+Q/Esc     quit
 ```
 
 `Prefix` controls the file stem. Keep it as `chip` for normal positives; use `neg` before capturing negative samples if you want the filenames to visually separate them. The label status still comes from `Accept` or `Negative`.

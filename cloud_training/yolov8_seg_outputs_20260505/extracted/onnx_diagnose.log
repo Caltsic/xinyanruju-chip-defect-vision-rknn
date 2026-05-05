@@ -1,0 +1,8 @@
+model=/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/chipcheck_yolov8_seg.onnx
+inputs:
+  images: [1, 3, 640, 640]
+outputs:
+  output0: [1, 40, 8400] pred_candidate channel_axis=1
+  output1: [1, 32, 160, 160] proto_candidate
+split command:
+  python tools/split_yolov8_seg_onnx_outputs.py --input outputs/final/chipcheck_yolov8_seg.onnx --output outputs/final/chipcheck_yolov8_seg_split.onnx --class-count 4 --mask-count 32

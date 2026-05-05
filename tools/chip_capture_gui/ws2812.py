@@ -67,3 +67,63 @@ class AdbWs2812Controller:
             raise RuntimeError((result.stderr or result.stdout).strip() or "WS2812 off failed")
         self.light_settings.brightness = 0.0
         return result.stdout.strip()
+
+
+class LocalWs2812Controller:
+    def __init__(self, _camera_settings: CameraSettings, light_settings: LightSettings) -> None:
+        self.light_settings = light_settings
+
+    def _run(self, remote_args: list[str]) -> str:
+        result = subprocess.run(
+            ["sh", "-c", " ".join(shlex.quote(part) for part in remote_args)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=8,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout).strip() or "WS2812 command failed")
+        return result.stdout.strip()
+
+    def set_brightness(self, brightness: float) -> str:
+        brightness = max(0.0, min(self.light_settings.max_brightness, brightness))
+        self.light_settings.brightness = brightness
+        return self._run(
+            [
+                "python3",
+                REMOTE_SCRIPT,
+                "--device",
+                self.light_settings.device,
+                "--count",
+                str(self.light_settings.count),
+                "--brightness",
+                f"{brightness:.3f}",
+                "--rgb",
+                self.light_settings.rgb_text(),
+            ]
+        )
+
+    def off(self) -> str:
+        self.light_settings.brightness = 0.0
+        return self._run(
+            [
+                "python3",
+                REMOTE_SCRIPT,
+                "--device",
+                self.light_settings.device,
+                "--count",
+                str(self.light_settings.count),
+                "--brightness",
+                "0",
+                "--off",
+            ]
+        )
+
+
+def create_ws2812_controller(camera_settings: CameraSettings, light_settings: LightSettings):
+    if camera_settings.backend == "local":
+        return LocalWs2812Controller(camera_settings, light_settings)
+    if camera_settings.backend == "adb":
+        return AdbWs2812Controller(camera_settings, light_settings)
+    raise ValueError(f"unsupported camera backend: {camera_settings.backend}")

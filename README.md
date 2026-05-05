@@ -115,19 +115,19 @@ F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-roi-m
 二阶段实时融合入口会在一个板端进程内串联 `chip ROI INT8 -> ROI crop -> defect INT8`：
 
 ```powershell
-F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
 ```
 
-当前 defect 框会比 chip 框更容易跳动；脚本已默认对 `chip-two-stage-maixcam` 开启显示端短时平滑，并在板端对 chip ROI crop 做轻度平滑。当前实拍阈值扫描后建议用较高缺陷阈值和较高显示上限，避免靠 top-k 截断：
+当前 defect 框会比 chip 框更容易跳动；脚本已默认对二阶段 profile 开启显示端短时平滑，并在板端对 chip ROI crop 做轻度平滑。当前实拍阈值扫描后建议用较高缺陷阈值和较高显示上限，避免靠 top-k 截断：
 
 ```powershell
-F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
 ```
 
-二阶段默认不是每帧都重跑 chip/defect 两个模型，而是 `chip-interval=3`、`defect-interval=2`。未启用板端全帧输入调整时，该节奏在当前 MaixCAM 1280x720 MJPG 流上约 `10.3-10.9 FPS`；当前默认启用 input-adjust 后的速度见下文。速度优先、芯片基本静止时可以用：
+二阶段默认不是每帧都重跑 chip/defect 两个模型，而是 `chip-interval=3`、`defect-interval=2`。未启用板端全帧输入调整时，该节奏在当前 UVC 1280x720 MJPG 流上约 `10.3-10.9 FPS`；当前默认启用 input-adjust 后的速度见下文。速度优先、芯片基本静止时可以用：
 
 ```powershell
-F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20 --chip-interval 5 --defect-interval 3
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20 --chip-interval 5 --defect-interval 3
 ```
 
 该模式实测约 `11.3-12.4 FPS`，代价是 chip/defect 检测结果更新频率更低。
@@ -141,7 +141,7 @@ rgb=190,255,100
 brightness=0.50
 ```
 
-`chip-two-stage-maixcam` 现在默认把当前推荐画面参数下沉到板端 NPU 输入。MaixCAM MJPG/YUYV 解码为 `RGB888` 后，板端先应用同一套轻量调整，再把调整后的 RGB888 同时送给 chip ROI / defect NPU，并转换为 NV12 回传给 PC 显示：
+二阶段 UVC profile 现在默认把当前推荐画面参数下沉到板端 NPU 输入。UVC MJPG/YUYV 解码为 `RGB888` 后，板端先应用同一套轻量调整，再把调整后的 RGB888 同时送给 chip ROI / defect NPU，并转换为 NV12 回传给 PC 显示：
 
 ```text
 Brightness -6
@@ -154,10 +154,37 @@ Sharpness 0.85
 `Denoise 6` 仍保留为 GUI 人工观察/落盘参数，不进入板端 NPU 输入；`CLAHE` 也不进入 NPU 输入。`--save-clean-snapshot` 在该模式下保存的是板端回传的已同步调整 clean 帧，不再是未调整原始帧。若现场优先速度，可降低或关闭锐化：
 
 ```powershell
-F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20 --input-sharpness 0
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20 --input-sharpness 0
 ```
 
 当前默认输入调整实测约 `8.3-9.2 FPS`；未做全帧输入调整时的二阶段节奏优化基线约 `10.3-10.9 FPS`。
+
+## IMX678 USB UVC 芯片检测
+
+当前新 IMX678 模组通过 USB 接入后被系统识别为 UVC 设备：
+
+```text
+lsusb: 1bcf:2cd1 Sunplus Innovation Technology Inc. DECXIN CAMERA
+/dev/video73  DECXIN CAMERA: DECXIN CAMERA
+/dev/video74  UVC metadata，不用于取图
+```
+
+该设备支持 `MJPG` 与 `YUYV`，推荐继续使用 `MJPG 1280x720` 作为实时检测输入；`1920x1080`/`3840x2160` 虽可枚举，但会增加 USB 解码和板端预处理负载。
+
+当前正式 profile：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
+```
+
+验证截图：
+
+```text
+captures/imx678_profile_two_stage_annotated.jpg
+captures/imx678_profile_two_stage_clean.jpg
+```
+
+当前烟测可出 `chip` 与 `broken` 框，但画面明显虚焦，`focus` 约 `3`，后续需要优先调整镜头/工作距或 UVC focus 控制。
 
 电脑端 YOLO11/COCO 实时显示仍可显式指定：
 
@@ -329,6 +356,25 @@ captures/roi_defect_closed_loop_capture/maixcam_current_clean_variants.jpg
 F:\anaconda\python.exe -m tools.chip_capture_gui
 ```
 
+Windows 端也可用 OpenCV 简化界面，后端仍走 ADB：
+
+```powershell
+F:\anaconda\python.exe -m tools.chip_capture_gui --opencv --backend adb
+```
+
+泰山派 HDMI 屏可直接用板端本地后端显示，不经过 ADB 拉流：
+
+```bash
+cd /userdata/chipcheck_vision
+python3 -m tools.chip_capture_gui --opencv --backend local --fullscreen
+```
+
+板端桌面已安装快捷方式 `Chip Check HDMI / 芯片检测 HDMI`，双击即可执行同一入口。桌面快捷方式默认使用 `960x540` 左上角窗口，避免 7 寸屏在 720p HDMI 模式下裁切全屏画面。若点击后无画面，先查看板端日志：
+
+```bash
+tail -80 /tmp/chipcheck-hdmi-gui.log
+```
+
 GUI 默认启动等价于当前二阶段实时命令的板端流：
 
 ```powershell
@@ -338,6 +384,8 @@ F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-s
 界面中的 `Live Detect` 用于实时观察 chip + defect 框，`Capture / Label` 用于关闭检测框专注标注，`Draw detection boxes` 可随时单独开关检测框。`Sync view to NPU input` 默认开启，GUI 会把 `Brightness/Contrast/Gamma/Saturation/Sharpness` 同步写到板端 `/tmp/chip_input_adjust.conf`，因此实时画面与 NPU 输入一致。`Denoise/CLAHE` 不进入 NPU 输入，只作为人工观察或落盘辅助。
 
 `Save adjusted capture` 默认开启，采集时会把当前可见画面保存为标注样本，并在 `meta/*.json` 记录具体参数。
+
+OpenCV 简化界面快捷键：`Tab` 选择 Brightness/Contrast/Gamma/Saturation/Sharpness/Light，`+/-` 微调；`1/2/3/0` 为 Pins/Text/Damage/Reset 预设；`C` 抓图进入 ROI 复核；复核时 `A/D/W/S` 移框、`+/-` 缩放、`Enter` 接受、`Delete` 或 `N` 标负样本、`Q/Esc` 退出。
 
 ### chip 类定位数据集
 
@@ -449,6 +497,53 @@ dataset_raw/chip_defect_raw
 第一版只做 YOLOv8 detect，不做 segmentation。数据准备脚本会把原始数据集中混合存在的 polygon 标注转换成 bbox 标注，并输出独立的检测训练数据副本，不覆盖原始标签。
 
 当前板端已新增 `rknn_chip_defect_camera_stream`，用于 YOLOv8 单输出 `1x8x8400` 缺陷检测后处理；旧 `rknn_yolo11_camera_stream` 仍保留给 YOLO11/COCO 80 类验证使用。
+
+## 芯片缺陷 YOLOv8-Seg RKNN 云训练包
+
+当前已新增独立分割训练包：
+
+```text
+cloud_training/yolov8_seg_rknn
+```
+
+该包用于复用原始 polygon 标注训练四类缺陷分割模型，不会改动现有 detect 训练包。数据准备脚本会保留 YOLO segmentation 行：
+
+```text
+class_id x1 y1 x2 y2 x3 y3 ...
+```
+
+bbox-only 行默认跳过并写入 `dataset_report.json`。完整云端流程会产出：
+
+- `chipcheck_yolov8_seg.pt`
+- `chipcheck_yolov8_seg.onnx`
+- `chipcheck_yolov8_seg_split.onnx`
+- `chipcheck_yolov8_seg_fp.rknn`
+- `chipcheck_yolov8_seg_split_int8.rknn`
+- `chip_defect_seg_labels.txt`
+- `calib_dataset.txt`
+
+首版分割部署仍沿用二阶段路径：`chip ROI INT8 -> ROI crop -> defect seg INT8`。PC/GUI 侧已兼容 contour 回传并用半透明掩膜绘制；板端 seg hook 可识别 `boxes/scores/mask_coeffs/protos` split 输出和标准 `pred + protos` 输出，使用 mask coeff 与 proto 生成轻量 contour，mask 点过少时回退 bbox contour。
+
+2026-05-05 已完成第一轮上板烟测：`rknn_chip_two_stage_maixcam_stream` 已原生重编译并替换到 `/userdata/rknn_yolo11_demo/`，旧二进制备份为 `rknn_chip_two_stage_maixcam_stream.bak_pre_seg_20260505`；`chipcheck_yolov8_seg_split_int8.rknn` 已部署到 `/userdata/rknn_yolo11_demo/model/`。IMX678 UVC 10 帧 headless 测试通过，状态栏 `FPS 8.7 | focus 159 | 1280x720 | det 2/2 | frame 9`，截图中 `scratch 0.56` 已显示分割轮廓/掩膜。
+
+云端训练入口：
+
+```bash
+cd cloud_training/yolov8_seg_rknn
+python scripts/run_all.py --raw-dataset dataset_raw/chip_defect_raw --work-dir outputs --model yolov8n-seg.pt --imgsz 640 --epochs 150 --device 0 --overwrite-dataset
+```
+
+板端模型部署到 `/userdata/rknn_yolo11_demo/model/chipcheck_yolov8_seg_split_int8.rknn` 后，PC 侧 seg profile：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-seg-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
+```
+
+分割首轮观察可降低缺陷阈值并关闭确认延迟，便于直接看 contour 是否稳定：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-seg-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.30 --defect-confirm 1 --display-max-defects 20
+```
 
 ## 二阶段 chip ROI + defect 实时检测
 

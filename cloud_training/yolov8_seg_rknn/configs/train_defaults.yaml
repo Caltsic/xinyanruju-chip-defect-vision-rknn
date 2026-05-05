@@ -1,0 +1,14 @@
+model: yolov8n-seg.pt
+imgsz: 640
+epochs: 150
+batch: -1
+workers: 8
+patience: 30
+seed: 42
+calib_count: 300
+target_platform: rk3576
+class_names:
+  - ZF-scratch
+  - scratch
+  - broken
+  - pinbreak

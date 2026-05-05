@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import shlex
 import time
 from dataclasses import dataclass
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -35,19 +34,20 @@ from PyQt5.QtWidgets import (
 
 from tools.chip_roi_utils import clamp_box, draw_chip_box, expand_box, locate_chip_dark_edge
 from tools.adb_imx415_rknn_live_view import (
+    CHIP_DEFECT_SEG_REMOTE_MODEL,
+    CHIP_REMOTE_MODEL,
     CHIP_TWO_STAGE_CLASSES,
+    TWO_STAGE_PROFILES,
     draw_detections,
     filter_display_detections,
-    input_adjust_config_text,
-    run_adb_shell,
 )
 
-from .camera import AdbRknnCamera, format_stream_error
+from .camera import RknnCamera, create_camera, format_stream_error, write_input_adjust_config
 from .image_adjust import apply_adjustments
 from .models import CameraFrame
 from .settings import DEFAULT_OUTPUT_DIR, CameraSettings, ImageAdjustSettings, LightSettings
 from .storage import CaptureStorage, ChipRoiRecord
-from .ws2812 import AdbWs2812Controller
+from .ws2812 import create_ws2812_controller
 
 
 NO_FRAME_TIMEOUT_MS = 8000
@@ -71,10 +71,10 @@ class CameraThread(QThread):
         super().__init__()
         self.settings = settings
         self._running = False
-        self._camera: AdbRknnCamera | None = None
+        self._camera: RknnCamera | None = None
 
     def run(self) -> None:
-        camera = AdbRknnCamera(self.settings)
+        camera = create_camera(self.settings)
         self._camera = camera
         self._running = True
         try:
@@ -160,7 +160,7 @@ class MainWindow(QMainWindow):
         self.image_settings = ImageAdjustSettings()
         self.light_settings = LightSettings()
         self.storage = CaptureStorage(DEFAULT_OUTPUT_DIR)
-        self.light_controller = AdbWs2812Controller(self.camera_settings, self.light_settings)
+        self.light_controller = create_ws2812_controller(self.camera_settings, self.light_settings)
         self.light_executor = ThreadPoolExecutor(max_workers=1)
         self.adjust_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -249,9 +249,12 @@ class MainWindow(QMainWindow):
         self.mode_group.addButton(self.capture_mode_btn, 0)
         self.mode_group.addButton(self.live_mode_btn, 1)
         self.mode_group.idClicked.connect(self._mode_changed)
-        self.draw_detections_check = QCheckBox("Draw detection boxes")
+        self.draw_detections_check = QCheckBox("Draw detection masks/boxes")
         self.draw_detections_check.setChecked(True)
         self.draw_detections_check.toggled.connect(self._live_overlay_changed)
+        self.seg_model_check = QCheckBox("Use segmentation defect model")
+        self.seg_model_check.setChecked(self.camera_settings.defect_model_kind == "seg")
+        self.seg_model_check.toggled.connect(self._seg_model_toggled)
         self.input_adjust_check = QCheckBox("Sync view to NPU input")
         self.input_adjust_check.setChecked(self.camera_settings.input_adjust)
         self.input_adjust_check.toggled.connect(self._input_adjust_toggled)
@@ -260,8 +263,9 @@ class MainWindow(QMainWindow):
         mode_layout.addWidget(self.capture_mode_btn, 0, 0)
         mode_layout.addWidget(self.live_mode_btn, 0, 1)
         mode_layout.addWidget(self.draw_detections_check, 1, 0, 1, 2)
-        mode_layout.addWidget(self.input_adjust_check, 2, 0, 1, 2)
-        mode_layout.addWidget(self.save_adjusted_check, 3, 0, 1, 2)
+        mode_layout.addWidget(self.seg_model_check, 2, 0, 1, 2)
+        mode_layout.addWidget(self.input_adjust_check, 3, 0, 1, 2)
+        mode_layout.addWidget(self.save_adjusted_check, 4, 0, 1, 2)
         panel_layout.addWidget(mode_box)
 
         batch_box = QGroupBox("Batch")
@@ -806,6 +810,16 @@ class MainWindow(QMainWindow):
         if self.review_state is None and self.last_frame is not None:
             self._render_frame(self.last_frame)
 
+    def _seg_model_toggled(self, checked: bool) -> None:
+        self.camera_settings.defect_model_kind = "seg" if checked else "detect"
+        self.camera_settings.remote_defect_model = CHIP_DEFECT_SEG_REMOTE_MODEL if checked else CHIP_REMOTE_MODEL
+        if self.camera_settings.profile.endswith("maixcam"):
+            self.camera_settings.profile = "chip-two-stage-seg-maixcam" if checked else "chip-two-stage-maixcam"
+        else:
+            self.camera_settings.profile = "chip-two-stage-seg-imx678" if checked else "chip-two-stage-imx678"
+        suffix = "restart camera to apply" if self.camera_thread is not None else "ready"
+        self._set_status(f"segmentation defect model {'on' if checked else 'off'} | {suffix}")
+
     def _toggle_advanced(self) -> None:
         visible = self.advanced_btn.isChecked()
         self.advanced_btn.setArrowType(Qt.ArrowType.DownArrow if visible else Qt.ArrowType.RightArrow)
@@ -850,10 +864,7 @@ class MainWindow(QMainWindow):
 
     def _send_input_adjust(self) -> None:
         self._sync_input_adjust_settings()
-        args = self.camera_settings.to_namespace()
-        text = input_adjust_config_text(args)
-        script = f"cat > {shlex.quote(args.input_adjust_file)} <<'EOF'\n{text}EOF"
-        self.adjust_executor.submit(run_adb_shell, args, script, 5.0)
+        self.adjust_executor.submit(write_input_adjust_config, self.camera_settings)
 
     def _schedule_light(self) -> None:
         self.light_timer.start(180)
@@ -892,7 +903,7 @@ class MainWindow(QMainWindow):
         frame: CameraFrame,
         image_bgr,
     ) -> tuple[tuple[int, int, int, int] | None, str, float]:
-        if self.camera_settings.profile == "chip-two-stage-maixcam":
+        if self.camera_settings.profile in TWO_STAGE_PROFILES:
             best_box: tuple[int, int, int, int] | None = None
             best_rank = -1.0
             best_conf = 0.0

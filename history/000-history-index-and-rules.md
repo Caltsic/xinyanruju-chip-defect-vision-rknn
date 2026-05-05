@@ -55,3 +55,11 @@
 | `026-chip_capture_gui_two_stage_live_tuning.md` | 需要确认 GUI 内二阶段实时检测、调参采集、引脚/丝印/破损预设和验证结果时 | chip_capture_gui、Live Detect、Save adjusted、Pins、Text、Damage |
 | `027-board_input_adjust_matches_display.md` | 需要确认 MaixCAM 二阶段实时的 NPU 输入是否与显示画面一致、板端 input-adjust 参数、性能代价和关闭锐化方式时 | input-adjust、RGB888、NPU输入、显示一致、Sharpness、FPS |
 | `028-two_stage_threshold_display_tuning.md` | 需要确认二阶段 defect 置信度阈值、显示框数量限制来源、当前推荐显示命令时 | defect-conf、defect-confirm、display-max-defects、阈值扫描、top-k |
+| `029-chip_capture_gui_dual_backend_opencv_board_ui.md` | 需要确认 chip_capture_gui 的 ADB/本地双后端、板端 HDMI OpenCV 界面、启动命令和快捷键时 | chip_capture_gui、OpenCV、backend、local、HDMI、PyQt fallback、/userdata/chipcheck_vision |
+| `030-imx678_usb_uvc_realtime_profile.md` | 需要确认 IMX678 USB UVC 识别结果、`/dev/video73` 格式、正式 imx678 profile 和烟测截图时 | IMX678、UVC、DECXIN、1bcf:2cd1、chip-two-stage-imx678、/dev/video73 |
+
+## Recent Additions
+
+| File | When To Read | Keywords |
+| --- | --- | --- |
+| `031-yolov8_seg_board_smoke.md` | Confirm YOLOv8-Seg board deployment, two-stage seg smoke results, contour screenshots, or the rebuilt stream binary state. | YOLOv8-Seg, RKNN, chip-two-stage-seg-imx678, contour, mask_coeffs, protos |

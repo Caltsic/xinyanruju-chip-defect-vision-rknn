@@ -21,6 +21,7 @@
 #include <string.h>
 #include <sys/time.h>
 
+#include <algorithm>
 #include <set>
 #include <vector>
 #ifndef YOLO_LABEL_TXT_PATH
@@ -562,6 +563,219 @@ static float yolov8_tensor_value_by_attr(void *tensor, rknn_tensor_attr *attr, i
     return ((float *)tensor)[offset];
 }
 
+static float clamp_float(float value, float min_value, float max_value)
+{
+    return value < min_value ? min_value : (value > max_value ? max_value : value);
+}
+
+static int clamp_int_value(int value, int min_value, int max_value)
+{
+    return value < min_value ? min_value : (value > max_value ? max_value : value);
+}
+
+struct Yolov8SegProtoLayout
+{
+    int mask_dim;
+    int height;
+    int width;
+    bool channel_first;
+};
+
+struct Yolov8SegCandidate
+{
+    float x;
+    float y;
+    float w;
+    float h;
+    float score;
+    int class_id;
+    std::vector<float> coeffs;
+};
+
+struct SegBoundaryPoint
+{
+    float x;
+    float y;
+    float angle;
+};
+
+static bool tensor_name_contains(rknn_tensor_attr *attr, const char *needle)
+{
+    return attr != nullptr && needle != nullptr && strstr(attr->name, needle) != nullptr;
+}
+
+static bool yolov8_parse_rank3_shape(rknn_tensor_attr *attr, int *channels, int *anchors, bool *channel_first)
+{
+    if (attr->n_dims < 3 || attr->dims[1] <= 0 || attr->dims[2] <= 0)
+    {
+        return false;
+    }
+
+    const int dim1 = attr->dims[1];
+    const int dim2 = attr->dims[2];
+    if (dim1 <= 512 && dim2 > dim1)
+    {
+        *channels = dim1;
+        *anchors = dim2;
+        *channel_first = true;
+        return true;
+    }
+    if (dim2 <= 512)
+    {
+        *channels = dim2;
+        *anchors = dim1;
+        *channel_first = false;
+        return true;
+    }
+
+    *channels = dim1;
+    *anchors = dim2;
+    *channel_first = true;
+    return true;
+}
+
+static bool yolov8_parse_proto_shape(rknn_tensor_attr *attr, Yolov8SegProtoLayout *layout)
+{
+    if (attr == nullptr || layout == nullptr || attr->n_dims < 4)
+    {
+        return false;
+    }
+
+    const int dim1 = attr->dims[1];
+    const int dim2 = attr->dims[2];
+    const int dim3 = attr->dims[3];
+    const bool nchw_like = dim1 > 0 && dim1 <= 128 && dim2 >= 4 && dim3 >= 4 && dim2 * dim3 > dim1;
+    const bool nhwc_like = dim3 > 0 && dim3 <= 128 && dim1 >= 4 && dim2 >= 4 && dim1 * dim2 > dim3;
+
+    if (nchw_like && (!nhwc_like || dim1 <= dim3))
+    {
+        layout->mask_dim = dim1;
+        layout->height = dim2;
+        layout->width = dim3;
+        layout->channel_first = true;
+        return true;
+    }
+    if (nhwc_like)
+    {
+        layout->mask_dim = dim3;
+        layout->height = dim1;
+        layout->width = dim2;
+        layout->channel_first = false;
+        return true;
+    }
+    return false;
+}
+
+static bool seg_proto_matches_output_set(rknn_app_context_t *app_ctx,
+                                         int candidate_index,
+                                         const Yolov8SegProtoLayout &candidate_layout)
+{
+    if (app_ctx->io_num.n_output == 2)
+    {
+        const int pred_index = candidate_index == 0 ? 1 : 0;
+        rknn_tensor_attr *pred_attr = &app_ctx->output_attrs[pred_index];
+        return pred_attr->n_dims >= 3 &&
+               ((pred_attr->dims[1] > 4 + candidate_layout.mask_dim) ||
+                (pred_attr->dims[2] > 4 + candidate_layout.mask_dim));
+    }
+
+    if (app_ctx->io_num.n_output >= 4)
+    {
+        bool has_boxes = false;
+        bool has_coeffs = false;
+        for (int j = 0; j < app_ctx->io_num.n_output; ++j)
+        {
+            if (j == candidate_index)
+            {
+                continue;
+            }
+            int channels = 0;
+            int anchors = 0;
+            bool channel_first = true;
+            if (yolov8_parse_shape(&app_ctx->output_attrs[j], 4, &channels, &anchors, &channel_first))
+            {
+                has_boxes = true;
+                continue;
+            }
+            if (yolov8_parse_shape(&app_ctx->output_attrs[j], candidate_layout.mask_dim,
+                                   &channels, &anchors, &channel_first))
+            {
+                has_coeffs = true;
+            }
+        }
+        return has_boxes && has_coeffs;
+    }
+
+    return false;
+}
+
+static bool find_seg_proto_output(rknn_app_context_t *app_ctx, int *proto_index, Yolov8SegProtoLayout *proto_layout)
+{
+    if (app_ctx == nullptr || proto_index == nullptr || proto_layout == nullptr)
+    {
+        return false;
+    }
+
+    int fallback_index = -1;
+    Yolov8SegProtoLayout fallback_layout;
+    memset(&fallback_layout, 0, sizeof(fallback_layout));
+
+    for (int i = 0; i < app_ctx->io_num.n_output; ++i)
+    {
+        Yolov8SegProtoLayout candidate_layout;
+        if (!yolov8_parse_proto_shape(&app_ctx->output_attrs[i], &candidate_layout))
+        {
+            continue;
+        }
+        if (!seg_proto_matches_output_set(app_ctx, i, candidate_layout))
+        {
+            continue;
+        }
+
+        if (tensor_name_contains(&app_ctx->output_attrs[i], "proto"))
+        {
+            *proto_index = i;
+            *proto_layout = candidate_layout;
+            return true;
+        }
+        if (fallback_index < 0)
+        {
+            fallback_index = i;
+            fallback_layout = candidate_layout;
+        }
+    }
+
+    if (fallback_index >= 0)
+    {
+        *proto_index = fallback_index;
+        *proto_layout = fallback_layout;
+        return true;
+    }
+    return false;
+}
+
+static int infer_seg_class_count(rknn_tensor_attr *det_attr, int mask_dim, int fallback_class_count)
+{
+    int channels = 0;
+    int anchors = 0;
+    bool channel_first = true;
+    (void)anchors;
+    (void)channel_first;
+    if (det_attr != nullptr && det_attr->n_dims >= 3 && det_attr->dims[1] > 4 + mask_dim)
+    {
+        channels = det_attr->dims[1];
+    }
+    else if (det_attr != nullptr && det_attr->n_dims >= 3 && det_attr->dims[2] > 4 + mask_dim)
+    {
+        channels = det_attr->dims[2];
+    }
+    if (channels > 4 + mask_dim)
+    {
+        return channels - 4 - mask_dim;
+    }
+    return fallback_class_count > 0 ? fallback_class_count : OBJ_CLASS_NUM;
+}
+
 template <typename T>
 static int process_yolov8_one_output(T *tensor, int32_t zp, float scale,
                                      int channels, int anchors, bool channel_first, int class_count,
@@ -667,6 +881,478 @@ static int process_yolov8_split_outputs(void *box_tensor, rknn_tensor_attr *box_
     return validCount;
 }
 
+static int process_yolov8_combined_seg_output(void *pred_tensor, rknn_tensor_attr *pred_attr,
+                                              int mask_dim, float threshold,
+                                              std::vector<Yolov8SegCandidate> &candidates)
+{
+    int channels = 0;
+    int anchors = 0;
+    bool channel_first = true;
+
+    if (pred_attr == nullptr || pred_attr->n_dims < 3)
+    {
+        return -1;
+    }
+    if (pred_attr->dims[1] > 4 + mask_dim)
+    {
+        channels = pred_attr->dims[1];
+        anchors = pred_attr->dims[2];
+        channel_first = true;
+    }
+    else if (pred_attr->dims[2] > 4 + mask_dim)
+    {
+        channels = pred_attr->dims[2];
+        anchors = pred_attr->dims[1];
+        channel_first = false;
+    }
+    else
+    {
+        return -1;
+    }
+
+    const int class_count = channels - 4 - mask_dim;
+    if (class_count <= 0 || anchors <= 0)
+    {
+        return -1;
+    }
+
+    int validCount = 0;
+    for (int anchor = 0; anchor < anchors; ++anchor)
+    {
+        int max_class_id = -1;
+        float max_score = 0.0f;
+        for (int c = 0; c < class_count; ++c)
+        {
+            const int offset = yolov8_output_offset(4 + c, anchor, channels, anchors, channel_first);
+            const float score = yolov8_tensor_value_by_attr(pred_tensor, pred_attr, offset);
+            if (score > max_score)
+            {
+                max_score = score;
+                max_class_id = c;
+            }
+        }
+        if (max_class_id < 0 || max_score <= threshold)
+        {
+            continue;
+        }
+
+        const float cx = yolov8_tensor_value_by_attr(pred_tensor, pred_attr,
+                                                     yolov8_output_offset(0, anchor, channels, anchors, channel_first));
+        const float cy = yolov8_tensor_value_by_attr(pred_tensor, pred_attr,
+                                                     yolov8_output_offset(1, anchor, channels, anchors, channel_first));
+        const float w = yolov8_tensor_value_by_attr(pred_tensor, pred_attr,
+                                                    yolov8_output_offset(2, anchor, channels, anchors, channel_first));
+        const float h = yolov8_tensor_value_by_attr(pred_tensor, pred_attr,
+                                                    yolov8_output_offset(3, anchor, channels, anchors, channel_first));
+        if (!isfinite(cx) || !isfinite(cy) || !isfinite(w) || !isfinite(h) || w <= 0.0f || h <= 0.0f)
+        {
+            continue;
+        }
+
+        Yolov8SegCandidate candidate;
+        candidate.x = cx - w * 0.5f;
+        candidate.y = cy - h * 0.5f;
+        candidate.w = w;
+        candidate.h = h;
+        candidate.score = max_score > 1.0f ? 1.0f : max_score;
+        candidate.class_id = max_class_id;
+        candidate.coeffs.resize(mask_dim);
+        for (int k = 0; k < mask_dim; ++k)
+        {
+            const int offset = yolov8_output_offset(4 + class_count + k, anchor, channels, anchors, channel_first);
+            candidate.coeffs[k] = yolov8_tensor_value_by_attr(pred_tensor, pred_attr, offset);
+        }
+        candidates.push_back(candidate);
+        validCount++;
+    }
+    return validCount;
+}
+
+static int process_yolov8_split_seg_outputs(void *box_tensor, rknn_tensor_attr *box_attr,
+                                            int box_channels, int anchors, bool box_channel_first,
+                                            void *score_tensor, rknn_tensor_attr *score_attr,
+                                            int score_channels, bool score_channel_first,
+                                            void *coeff_tensor, rknn_tensor_attr *coeff_attr,
+                                            int coeff_channels, bool coeff_channel_first,
+                                            float threshold,
+                                            std::vector<Yolov8SegCandidate> &candidates)
+{
+    int validCount = 0;
+    for (int anchor = 0; anchor < anchors; ++anchor)
+    {
+        int max_class_id = -1;
+        float max_score = 0.0f;
+        for (int c = 0; c < score_channels; ++c)
+        {
+            const int offset = yolov8_output_offset(c, anchor, score_channels, anchors, score_channel_first);
+            const float score = yolov8_tensor_value_by_attr(score_tensor, score_attr, offset);
+            if (score > max_score)
+            {
+                max_score = score;
+                max_class_id = c;
+            }
+        }
+        if (max_class_id < 0 || max_score <= threshold)
+        {
+            continue;
+        }
+
+        const float cx = yolov8_tensor_value_by_attr(box_tensor, box_attr,
+                                                     yolov8_output_offset(0, anchor, box_channels, anchors, box_channel_first));
+        const float cy = yolov8_tensor_value_by_attr(box_tensor, box_attr,
+                                                     yolov8_output_offset(1, anchor, box_channels, anchors, box_channel_first));
+        const float w = yolov8_tensor_value_by_attr(box_tensor, box_attr,
+                                                    yolov8_output_offset(2, anchor, box_channels, anchors, box_channel_first));
+        const float h = yolov8_tensor_value_by_attr(box_tensor, box_attr,
+                                                    yolov8_output_offset(3, anchor, box_channels, anchors, box_channel_first));
+        if (!isfinite(cx) || !isfinite(cy) || !isfinite(w) || !isfinite(h) || w <= 0.0f || h <= 0.0f)
+        {
+            continue;
+        }
+
+        Yolov8SegCandidate candidate;
+        candidate.x = cx - w * 0.5f;
+        candidate.y = cy - h * 0.5f;
+        candidate.w = w;
+        candidate.h = h;
+        candidate.score = max_score > 1.0f ? 1.0f : max_score;
+        candidate.class_id = max_class_id;
+        candidate.coeffs.resize(coeff_channels);
+        for (int k = 0; k < coeff_channels; ++k)
+        {
+            const int offset = yolov8_output_offset(k, anchor, coeff_channels, anchors, coeff_channel_first);
+            candidate.coeffs[k] = yolov8_tensor_value_by_attr(coeff_tensor, coeff_attr, offset);
+        }
+        candidates.push_back(candidate);
+        validCount++;
+    }
+    return validCount;
+}
+
+static int proto_output_offset(const Yolov8SegProtoLayout &layout, int channel, int y, int x)
+{
+    return layout.channel_first
+               ? channel * layout.height * layout.width + y * layout.width + x
+               : (y * layout.width + x) * layout.mask_dim + channel;
+}
+
+static void fill_detect_result_from_candidate(const Yolov8SegCandidate &candidate,
+                                              letterbox_t *letter_box,
+                                              int model_in_w,
+                                              int model_in_h,
+                                              object_detect_result *det)
+{
+    const float x1 = candidate.x - letter_box->x_pad;
+    const float y1 = candidate.y - letter_box->y_pad;
+    const float x2 = x1 + candidate.w;
+    const float y2 = y1 + candidate.h;
+
+    det->box.left = (int)(clamp(x1, 0, model_in_w) / letter_box->scale);
+    det->box.top = (int)(clamp(y1, 0, model_in_h) / letter_box->scale);
+    det->box.right = (int)(clamp(x2, 0, model_in_w) / letter_box->scale);
+    det->box.bottom = (int)(clamp(y2, 0, model_in_h) / letter_box->scale);
+    det->prop = candidate.score;
+    det->cls_id = candidate.class_id;
+}
+
+static int select_seg_candidates_after_nms(const std::vector<Yolov8SegCandidate> &candidates,
+                                           letterbox_t *letter_box,
+                                           float nms_threshold,
+                                           int model_in_w,
+                                           int model_in_h,
+                                           object_detect_result_list *bbox_fallback,
+                                           std::vector<int> *selected_indices)
+{
+    bbox_fallback->count = 0;
+    selected_indices->clear();
+    const int validCount = (int)candidates.size();
+    if (validCount <= 0)
+    {
+        return 0;
+    }
+
+    std::vector<float> boxes;
+    std::vector<float> sortScores;
+    std::vector<int> classId;
+    std::vector<int> indexArray;
+    boxes.reserve(validCount * 4);
+    sortScores.reserve(validCount);
+    classId.reserve(validCount);
+    indexArray.reserve(validCount);
+    for (int i = 0; i < validCount; ++i)
+    {
+        boxes.push_back(candidates[i].x);
+        boxes.push_back(candidates[i].y);
+        boxes.push_back(candidates[i].w);
+        boxes.push_back(candidates[i].h);
+        sortScores.push_back(candidates[i].score);
+        classId.push_back(candidates[i].class_id);
+        indexArray.push_back(i);
+    }
+
+    quick_sort_indice_inverse(sortScores, 0, validCount - 1, indexArray);
+    std::set<int> class_set(std::begin(classId), std::end(classId));
+    for (auto c : class_set)
+    {
+        nms(validCount, boxes, classId, indexArray, c, nms_threshold);
+    }
+
+    for (int i = 0; i < validCount && bbox_fallback->count < OBJ_NUMB_MAX_SIZE; ++i)
+    {
+        if (indexArray[i] == -1)
+        {
+            continue;
+        }
+        const int n = indexArray[i];
+        object_detect_result *det = &bbox_fallback->results[bbox_fallback->count];
+        fill_detect_result_from_candidate(candidates[n], letter_box, model_in_w, model_in_h, det);
+        selected_indices->push_back(n);
+        bbox_fallback->count++;
+    }
+    return bbox_fallback->count;
+}
+
+static bool append_contour_point(object_seg_contour *contour, int x, int y)
+{
+    if (contour->count >= 64)
+    {
+        return false;
+    }
+    if (contour->count > 0)
+    {
+        const object_seg_point &last = contour->points[contour->count - 1];
+        if (last.x == x && last.y == y)
+        {
+            return true;
+        }
+    }
+    contour->points[contour->count].x = x;
+    contour->points[contour->count].y = y;
+    contour->count++;
+    return true;
+}
+
+static bool fill_bbox_contour(object_seg_result *seg)
+{
+    if (seg == nullptr)
+    {
+        return false;
+    }
+    object_seg_contour *contour = &seg->contours[0];
+    contour->count = 0;
+    append_contour_point(contour, seg->det.box.left, seg->det.box.top);
+    append_contour_point(contour, seg->det.box.right, seg->det.box.top);
+    append_contour_point(contour, seg->det.box.right, seg->det.box.bottom);
+    append_contour_point(contour, seg->det.box.left, seg->det.box.bottom);
+    seg->contour_count = contour->count >= 3 ? 1 : 0;
+    return seg->contour_count > 0;
+}
+
+static bool boundary_point_angle_less(const SegBoundaryPoint &a, const SegBoundaryPoint &b)
+{
+    return a.angle < b.angle;
+}
+
+static bool build_mask_contour_from_proto(const Yolov8SegCandidate &candidate,
+                                          void *proto_tensor,
+                                          rknn_tensor_attr *proto_attr,
+                                          const Yolov8SegProtoLayout &proto_layout,
+                                          letterbox_t *letter_box,
+                                          int model_in_w,
+                                          int model_in_h,
+                                          object_seg_result *seg)
+{
+    if (proto_tensor == nullptr || proto_attr == nullptr || letter_box == nullptr ||
+        seg == nullptr || candidate.coeffs.size() < (size_t)proto_layout.mask_dim ||
+        letter_box->scale <= 0.0f || proto_layout.width <= 0 || proto_layout.height <= 0)
+    {
+        return false;
+    }
+
+    const float model_x1 = clamp_float(candidate.x, 0.0f, (float)model_in_w);
+    const float model_y1 = clamp_float(candidate.y, 0.0f, (float)model_in_h);
+    const float model_x2 = clamp_float(candidate.x + candidate.w, 0.0f, (float)model_in_w);
+    const float model_y2 = clamp_float(candidate.y + candidate.h, 0.0f, (float)model_in_h);
+    if (model_x2 <= model_x1 || model_y2 <= model_y1)
+    {
+        return false;
+    }
+
+    const int crop_x0 = clamp_int_value((int)floorf(model_x1 * proto_layout.width / model_in_w), 0, proto_layout.width - 1);
+    const int crop_y0 = clamp_int_value((int)floorf(model_y1 * proto_layout.height / model_in_h), 0, proto_layout.height - 1);
+    const int crop_x1 = clamp_int_value((int)ceilf(model_x2 * proto_layout.width / model_in_w) - 1, 0, proto_layout.width - 1);
+    const int crop_y1 = clamp_int_value((int)ceilf(model_y2 * proto_layout.height / model_in_h) - 1, 0, proto_layout.height - 1);
+    const int crop_w = crop_x1 - crop_x0 + 1;
+    const int crop_h = crop_y1 - crop_y0 + 1;
+    if (crop_w <= 0 || crop_h <= 0)
+    {
+        return false;
+    }
+
+    std::vector<unsigned char> mask(crop_w * crop_h, 0);
+    int mask_count = 0;
+    for (int py = crop_y0; py <= crop_y1; ++py)
+    {
+        for (int px = crop_x0; px <= crop_x1; ++px)
+        {
+            float logit = 0.0f;
+            for (int k = 0; k < proto_layout.mask_dim; ++k)
+            {
+                const int offset = proto_output_offset(proto_layout, k, py, px);
+                logit += candidate.coeffs[k] * yolov8_tensor_value_by_attr(proto_tensor, proto_attr, offset);
+            }
+            if (sigmoid(logit) >= 0.5f)
+            {
+                mask[(py - crop_y0) * crop_w + (px - crop_x0)] = 1;
+                mask_count++;
+            }
+        }
+    }
+    if (mask_count < 3)
+    {
+        return false;
+    }
+
+    const int src_w = std::max(1, (int)((model_in_w - 2 * letter_box->x_pad) / letter_box->scale + 0.5f));
+    const int src_h = std::max(1, (int)((model_in_h - 2 * letter_box->y_pad) / letter_box->scale + 0.5f));
+    const int max_x = src_w - 1;
+    const int max_y = src_h - 1;
+
+    std::vector<SegBoundaryPoint> boundary;
+    boundary.reserve(mask_count);
+    float center_x = 0.0f;
+    float center_y = 0.0f;
+    for (int y = 0; y < crop_h; ++y)
+    {
+        for (int x = 0; x < crop_w; ++x)
+        {
+            if (!mask[y * crop_w + x])
+            {
+                continue;
+            }
+            const bool is_boundary = x == 0 || y == 0 || x == crop_w - 1 || y == crop_h - 1 ||
+                                     !mask[y * crop_w + x - 1] || !mask[y * crop_w + x + 1] ||
+                                     !mask[(y - 1) * crop_w + x] || !mask[(y + 1) * crop_w + x];
+            if (!is_boundary)
+            {
+                continue;
+            }
+            const int proto_x = crop_x0 + x;
+            const int proto_y = crop_y0 + y;
+            const float model_x = ((float)proto_x + 0.5f) * model_in_w / proto_layout.width;
+            const float model_y = ((float)proto_y + 0.5f) * model_in_h / proto_layout.height;
+            const float image_x = (model_x - letter_box->x_pad) / letter_box->scale;
+            const float image_y = (model_y - letter_box->y_pad) / letter_box->scale;
+            SegBoundaryPoint point;
+            point.x = clamp_float(image_x, 0.0f, (float)max_x);
+            point.y = clamp_float(image_y, 0.0f, (float)max_y);
+            point.angle = 0.0f;
+            boundary.push_back(point);
+            center_x += point.x;
+            center_y += point.y;
+        }
+    }
+    if (boundary.size() < 3)
+    {
+        return false;
+    }
+
+    center_x /= (float)boundary.size();
+    center_y /= (float)boundary.size();
+    for (size_t i = 0; i < boundary.size(); ++i)
+    {
+        boundary[i].angle = atan2f(boundary[i].y - center_y, boundary[i].x - center_x);
+    }
+    std::sort(boundary.begin(), boundary.end(), boundary_point_angle_less);
+
+    object_seg_contour *contour = &seg->contours[0];
+    contour->count = 0;
+    const int target_count = (int)std::min((size_t)64, boundary.size());
+    for (int i = 0; i < target_count; ++i)
+    {
+        const size_t source_index = (size_t)i * boundary.size() / target_count;
+        const int x = clamp_int_value((int)(boundary[source_index].x + 0.5f), 0, max_x);
+        const int y = clamp_int_value((int)(boundary[source_index].y + 0.5f), 0, max_y);
+        append_contour_point(contour, x, y);
+    }
+    if (contour->count > 1)
+    {
+        const object_seg_point &first = contour->points[0];
+        const object_seg_point &last = contour->points[contour->count - 1];
+        if (first.x == last.x && first.y == last.y)
+        {
+            contour->count--;
+        }
+    }
+
+    if (contour->count < 3)
+    {
+        return false;
+    }
+
+    seg->has_mask = 1;
+    seg->mask_width = proto_layout.width;
+    seg->mask_height = proto_layout.height;
+    seg->contour_count = 1;
+    return true;
+}
+
+static int fill_detect_results_from_vectors(int validCount,
+                                            std::vector<float> &filterBoxes,
+                                            std::vector<float> &objProbs,
+                                            std::vector<int> &classId,
+                                            letterbox_t *letter_box,
+                                            float nms_threshold,
+                                            int model_in_w,
+                                            int model_in_h,
+                                            object_detect_result_list *od_results)
+{
+    if (validCount <= 0)
+    {
+        return 0;
+    }
+    std::vector<int> indexArray;
+    for (int i = 0; i < validCount; ++i)
+    {
+        indexArray.push_back(i);
+    }
+    quick_sort_indice_inverse(objProbs, 0, validCount - 1, indexArray);
+
+    std::set<int> class_set(std::begin(classId), std::end(classId));
+    for (auto c : class_set)
+    {
+        nms(validCount, filterBoxes, classId, indexArray, c, nms_threshold);
+    }
+
+    int last_count = 0;
+    od_results->count = 0;
+    for (int i = 0; i < validCount; ++i)
+    {
+        if (indexArray[i] == -1 || last_count >= OBJ_NUMB_MAX_SIZE)
+        {
+            continue;
+        }
+        int n = indexArray[i];
+
+        float x1 = filterBoxes[n * 4 + 0] - letter_box->x_pad;
+        float y1 = filterBoxes[n * 4 + 1] - letter_box->y_pad;
+        float x2 = x1 + filterBoxes[n * 4 + 2];
+        float y2 = y1 + filterBoxes[n * 4 + 3];
+        int id = classId[n];
+        float obj_conf = objProbs[i];
+
+        od_results->results[last_count].box.left = (int)(clamp(x1, 0, model_in_w) / letter_box->scale);
+        od_results->results[last_count].box.top = (int)(clamp(y1, 0, model_in_h) / letter_box->scale);
+        od_results->results[last_count].box.right = (int)(clamp(x2, 0, model_in_w) / letter_box->scale);
+        od_results->results[last_count].box.bottom = (int)(clamp(y2, 0, model_in_h) / letter_box->scale);
+        od_results->results[last_count].prop = obj_conf;
+        od_results->results[last_count].cls_id = id;
+        last_count++;
+    }
+    od_results->count = last_count;
+    return 0;
+}
+
 int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter_box, float conf_threshold, float nms_threshold, object_detect_result_list *od_results)
 {
 #if defined(RV1106_1103) 
@@ -683,7 +1369,7 @@ int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter
     int grid_w = 0;
     int model_in_w = app_ctx->model_width;
     int model_in_h = app_ctx->model_height;
-    const int class_count = app_ctx->class_count > 0 ? app_ctx->class_count : OBJ_CLASS_NUM;
+    int class_count = app_ctx->class_count > 0 ? app_ctx->class_count : OBJ_CLASS_NUM;
 
     memset(od_results, 0, sizeof(object_detect_result_list));
 
@@ -846,54 +1532,255 @@ int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter
     }
     }
 
-    // no object detect
-    if (validCount <= 0)
-    {
-        return 0;
-    }
-    std::vector<int> indexArray;
-    for (int i = 0; i < validCount; ++i)
-    {
-        indexArray.push_back(i);
-    }
-    quick_sort_indice_inverse(objProbs, 0, validCount - 1, indexArray);
+    return fill_detect_results_from_vectors(validCount, filterBoxes, objProbs, classId,
+                                            letter_box, nms_threshold, model_in_w, model_in_h,
+                                            od_results);
+}
 
-    std::set<int> class_set(std::begin(classId), std::end(classId));
-
-    for (auto c : class_set)
+int post_process_seg(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter_box,
+                     float conf_threshold, float nms_threshold,
+                     object_seg_result_list *seg_results,
+                     object_detect_result_list *bbox_fallback)
+{
+    if (seg_results == nullptr || bbox_fallback == nullptr)
     {
-        nms(validCount, filterBoxes, classId, indexArray, c, nms_threshold);
+        return -1;
     }
 
-    int last_count = 0;
-    od_results->count = 0;
+    memset(seg_results, 0, sizeof(*seg_results));
+    memset(bbox_fallback, 0, sizeof(*bbox_fallback));
+    seg_results->mask_status = 1;
 
-    /* box valid detect target */
-    for (int i = 0; i < validCount; ++i)
+    if (app_ctx == nullptr || outputs == nullptr || letter_box == nullptr)
     {
-        if (indexArray[i] == -1 || last_count >= OBJ_NUMB_MAX_SIZE)
+        return -1;
+    }
+
+#if defined(RV1106_1103)
+    static bool warned_rv1106 = false;
+    if (!warned_rv1106)
+    {
+        printf("YOLOv8-seg postprocess: RV1106/1103 mask path is not implemented\n");
+        warned_rv1106 = true;
+    }
+    return -1;
+#else
+    int proto_index = -1;
+    Yolov8SegProtoLayout proto_layout;
+    memset(&proto_layout, 0, sizeof(proto_layout));
+    if (!find_seg_proto_output(app_ctx, &proto_index, &proto_layout))
+    {
+        static bool warned_missing_proto = false;
+        if (!warned_missing_proto)
         {
-            continue;
+            printf("YOLOv8-seg postprocess: protos output not found; using bbox fallback\n");
+            warned_missing_proto = true;
         }
-        int n = indexArray[i];
-
-        float x1 = filterBoxes[n * 4 + 0] - letter_box->x_pad;
-        float y1 = filterBoxes[n * 4 + 1] - letter_box->y_pad;
-        float x2 = x1 + filterBoxes[n * 4 + 2];
-        float y2 = y1 + filterBoxes[n * 4 + 3];
-        int id = classId[n];
-        float obj_conf = objProbs[i];
-
-        od_results->results[last_count].box.left = (int)(clamp(x1, 0, model_in_w) / letter_box->scale);
-        od_results->results[last_count].box.top = (int)(clamp(y1, 0, model_in_h) / letter_box->scale);
-        od_results->results[last_count].box.right = (int)(clamp(x2, 0, model_in_w) / letter_box->scale);
-        od_results->results[last_count].box.bottom = (int)(clamp(y2, 0, model_in_h) / letter_box->scale);
-        od_results->results[last_count].prop = obj_conf;
-        od_results->results[last_count].cls_id = id;
-        last_count++;
+        return post_process(app_ctx, outputs, letter_box, conf_threshold, nms_threshold, bbox_fallback);
     }
-    od_results->count = last_count;
+
+    rknn_output *_outputs = (rknn_output *)outputs;
+    const int model_in_w = app_ctx->model_width;
+    const int model_in_h = app_ctx->model_height;
+    std::vector<Yolov8SegCandidate> candidates;
+    int ret = 0;
+
+    if (app_ctx->io_num.n_output == 2)
+    {
+        const int pred_index = proto_index == 0 ? 1 : 0;
+        ret = process_yolov8_combined_seg_output(_outputs[pred_index].buf,
+                                                 &app_ctx->output_attrs[pred_index],
+                                                 proto_layout.mask_dim,
+                                                 conf_threshold,
+                                                 candidates);
+    }
+    else if (app_ctx->io_num.n_output >= 4)
+    {
+        int box_index = -1;
+        int score_index = -1;
+        int coeff_index = -1;
+        int box_channels = 0;
+        int box_anchors = 0;
+        int score_channels = 0;
+        int score_anchors = 0;
+        int coeff_channels = 0;
+        int coeff_anchors = 0;
+        bool box_channel_first = true;
+        bool score_channel_first = true;
+        bool coeff_channel_first = true;
+
+        for (int i = 0; i < app_ctx->io_num.n_output; ++i)
+        {
+            if (i == proto_index)
+            {
+                continue;
+            }
+            rknn_tensor_attr *attr = &app_ctx->output_attrs[i];
+            int channels = 0;
+            int anchors = 0;
+            bool channel_first = true;
+            if (box_index < 0 && tensor_name_contains(attr, "box") &&
+                yolov8_parse_shape(attr, 4, &channels, &anchors, &channel_first))
+            {
+                box_index = i;
+                box_channels = channels;
+                box_anchors = anchors;
+                box_channel_first = channel_first;
+                continue;
+            }
+            if (score_index < 0 && tensor_name_contains(attr, "score") &&
+                yolov8_parse_rank3_shape(attr, &channels, &anchors, &channel_first))
+            {
+                score_index = i;
+                score_channels = channels;
+                score_anchors = anchors;
+                score_channel_first = channel_first;
+                continue;
+            }
+            if (coeff_index < 0 &&
+                (tensor_name_contains(attr, "coeff") || tensor_name_contains(attr, "mask")) &&
+                yolov8_parse_shape(attr, proto_layout.mask_dim, &channels, &anchors, &channel_first))
+            {
+                coeff_index = i;
+                coeff_channels = channels;
+                coeff_anchors = anchors;
+                coeff_channel_first = channel_first;
+                continue;
+            }
+        }
+
+        for (int i = 0; i < app_ctx->io_num.n_output; ++i)
+        {
+            if (i == proto_index)
+            {
+                continue;
+            }
+            rknn_tensor_attr *attr = &app_ctx->output_attrs[i];
+            int channels = 0;
+            int anchors = 0;
+            bool channel_first = true;
+            if (box_index < 0 && yolov8_parse_shape(attr, 4, &channels, &anchors, &channel_first))
+            {
+                box_index = i;
+                box_channels = channels;
+                box_anchors = anchors;
+                box_channel_first = channel_first;
+                continue;
+            }
+            if (coeff_index < 0 && yolov8_parse_shape(attr, proto_layout.mask_dim, &channels, &anchors, &channel_first))
+            {
+                coeff_index = i;
+                coeff_channels = channels;
+                coeff_anchors = anchors;
+                coeff_channel_first = channel_first;
+            }
+        }
+
+        for (int i = 0; i < app_ctx->io_num.n_output; ++i)
+        {
+            if (i == proto_index || i == box_index || i == coeff_index)
+            {
+                continue;
+            }
+            rknn_tensor_attr *attr = &app_ctx->output_attrs[i];
+            int channels = 0;
+            int anchors = 0;
+            bool channel_first = true;
+            if (yolov8_parse_rank3_shape(attr, &channels, &anchors, &channel_first))
+            {
+                score_index = i;
+                score_channels = channels;
+                score_anchors = anchors;
+                score_channel_first = channel_first;
+                break;
+            }
+        }
+
+        if (box_index < 0 || score_index < 0 || coeff_index < 0 ||
+            box_anchors != score_anchors || box_anchors != coeff_anchors)
+        {
+            static bool warned_bad_split = false;
+            if (!warned_bad_split)
+            {
+                printf("YOLOv8-seg postprocess: expected boxes/scores/mask_coeffs/protos outputs but got %d tensors\n",
+                       app_ctx->io_num.n_output);
+                warned_bad_split = true;
+            }
+            return -1;
+        }
+
+        ret = process_yolov8_split_seg_outputs(_outputs[box_index].buf, &app_ctx->output_attrs[box_index],
+                                               box_channels, box_anchors, box_channel_first,
+                                               _outputs[score_index].buf, &app_ctx->output_attrs[score_index],
+                                               score_channels, score_channel_first,
+                                               _outputs[coeff_index].buf, &app_ctx->output_attrs[coeff_index],
+                                               coeff_channels, coeff_channel_first,
+                                               conf_threshold, candidates);
+    }
+    else
+    {
+        static bool warned_unsupported = false;
+        if (!warned_unsupported)
+        {
+            printf("YOLOv8-seg postprocess: unsupported output count=%d; output shape needs inspection\n",
+                   app_ctx->io_num.n_output);
+            warned_unsupported = true;
+        }
+        return -1;
+    }
+
+    if (ret < 0)
+    {
+        static bool warned_parse_failed = false;
+        if (!warned_parse_failed)
+        {
+            printf("YOLOv8-seg postprocess: prediction parse failed; output shape needs inspection\n");
+            warned_parse_failed = true;
+        }
+        return -1;
+    }
+
+    std::vector<int> selected_indices;
+    select_seg_candidates_after_nms(candidates, letter_box, nms_threshold,
+                                    model_in_w, model_in_h, bbox_fallback, &selected_indices);
+
+    bool all_real_masks = bbox_fallback->count > 0;
+    seg_results->count = bbox_fallback->count;
+    for (int i = 0; i < bbox_fallback->count && i < OBJ_NUMB_MAX_SIZE; ++i)
+    {
+        object_seg_result *seg = &seg_results->results[i];
+        seg->det = bbox_fallback->results[i];
+        seg->has_mask = 0;
+        seg->mask_width = proto_layout.width;
+        seg->mask_height = proto_layout.height;
+        seg->contour_count = 0;
+        memset(seg->contours, 0, sizeof(seg->contours));
+
+        bool real_mask = false;
+        if (i < (int)selected_indices.size())
+        {
+            const int candidate_index = selected_indices[i];
+            if (candidate_index >= 0 && candidate_index < (int)candidates.size())
+            {
+                real_mask = build_mask_contour_from_proto(candidates[candidate_index],
+                                                          _outputs[proto_index].buf,
+                                                          &app_ctx->output_attrs[proto_index],
+                                                          proto_layout,
+                                                          letter_box,
+                                                          model_in_w,
+                                                          model_in_h,
+                                                          seg);
+            }
+        }
+        if (!real_mask)
+        {
+            fill_bbox_contour(seg);
+            all_real_masks = false;
+        }
+    }
+    seg_results->mask_status = all_real_masks ? 0 : 1;
     return 0;
+#endif
 }
 
 int init_post_process()

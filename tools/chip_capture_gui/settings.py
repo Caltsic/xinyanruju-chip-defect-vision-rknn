@@ -8,6 +8,7 @@ from typing import Any
 from tools.adb_imx415_rknn_live_view import (
     CHIP_REMOTE_WORKDIR,
     CHIP_ROI_REMOTE_MODEL,
+    CHIP_REMOTE_MODEL,
     CHIP_TWO_STAGE_MAIXCAM_REMOTE_BINARY,
     DEFAULT_CONF,
     DEFAULT_NMS,
@@ -23,12 +24,15 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "chip_roi" / "generated" / "gui_capture"
 
 @dataclass(slots=True)
 class CameraSettings:
+    backend: str = "adb"
     adb: str = default_adb_path()
     serial: str = DEFAULT_SERIAL
-    profile: str = "chip-two-stage-maixcam"
+    profile: str = "chip-two-stage-imx678"
     remote_workdir: str = CHIP_REMOTE_WORKDIR
     remote_binary: str = CHIP_TWO_STAGE_MAIXCAM_REMOTE_BINARY
     remote_model: str = CHIP_ROI_REMOTE_MODEL
+    remote_defect_model: str = CHIP_REMOTE_MODEL
+    defect_model_kind: str = "detect"
     device: str = "/dev/video73"
     width: int = 1280
     height: int = 720

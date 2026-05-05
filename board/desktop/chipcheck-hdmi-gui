@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+LOG=/tmp/chipcheck-hdmi-gui.log
+APP_DIR=/userdata/chipcheck_vision
+PYTHON=/srv/rk3576-storage/miniforge/bin/python3
+
+export DISPLAY="${DISPLAY:-:0}"
+export XAUTHORITY="${XAUTHORITY:-/home/lckfb/.Xauthority}"
+export QT_QPA_FONTDIR="${QT_QPA_FONTDIR:-/usr/share/fonts/truetype/dejavu}"
+
+mkdir -p "$(dirname "$LOG")"
+{
+  echo "==== $(date '+%Y-%m-%d %H:%M:%S') chipcheck hdmi gui ===="
+  echo "user=$(id -un) display=$DISPLAY xauthority=$XAUTHORITY"
+} >> "$LOG"
+
+if pgrep -f "python3 -m tools.chip_capture_gui --opencv --backend local" >/dev/null 2>&1; then
+  echo "already running" >> "$LOG"
+  exit 0
+fi
+
+cd "$APP_DIR"
+exec "$PYTHON" -m tools.chip_capture_gui --opencv --backend local --screen-width 960 --screen-height 540 --window-x 0 --window-y 0 >> "$LOG" 2>&1

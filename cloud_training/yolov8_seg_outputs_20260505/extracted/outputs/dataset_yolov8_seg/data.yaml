@@ -1,0 +1,10 @@
+path: /root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/dataset_yolov8_seg
+train: train/images
+val: valid/images
+test: test/images
+nc: 4
+names:
+  0: ZF-scratch
+  1: scratch
+  2: broken
+  3: pinbreak

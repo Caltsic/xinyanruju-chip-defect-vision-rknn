@@ -30,6 +30,11 @@ else:
 MAGIC = b"RYL1"
 HEADER_STRUCT = struct.Struct("<4sIIIII")
 BOX_STRUCT = struct.Struct("<Ifffff")
+CONTOUR_BLOCK_SIZE_STRUCT = struct.Struct("<I")
+CONTOUR_POINT_COUNT_STRUCT = struct.Struct("<I")
+CONTOUR_POINT_STRUCT = struct.Struct("<ff")
+DETECTION_CONTOURS_FLAG = 0x80000000
+DETECTION_COUNT_MASK = 0x7FFFFFFF
 
 YOLO11_REMOTE_WORKDIR = "/userdata/rknn_yolo11_demo"
 YOLO11_REMOTE_BINARY = "./rknn_yolo11_camera_stream"
@@ -37,6 +42,7 @@ YOLO11_REMOTE_MODEL = "model/yolo11n_rk3576.rknn"
 CHIP_REMOTE_WORKDIR = "/userdata/rknn_yolo11_demo"
 CHIP_REMOTE_BINARY = "./rknn_chip_defect_camera_stream"
 CHIP_REMOTE_MODEL = "model/chipcheck_yolov8_detect_split_int8.rknn"
+CHIP_DEFECT_SEG_REMOTE_MODEL = "model/chipcheck_yolov8_seg_split_int8.rknn"
 CHIP_MAIXCAM_REMOTE_BINARY = "./rknn_chip_defect_maixcam_stream"
 CHIP_ROI_REMOTE_BINARY = "./rknn_chip_roi_camera_stream"
 CHIP_ROI_MAIXCAM_REMOTE_BINARY = "./rknn_chip_roi_maixcam_stream"
@@ -179,6 +185,24 @@ CHIP_TWO_STAGE_CLASSES = [
     *CHIP_DEFECT_CLASSES,
 ]
 
+UVC_CHIP_PROFILES = (
+    "chip-defect-maixcam",
+    "chip-roi-maixcam",
+    "chip-two-stage-maixcam",
+    "chip-defect-imx678",
+    "chip-roi-imx678",
+    "chip-two-stage-imx678",
+    "chip-two-stage-seg-maixcam",
+    "chip-two-stage-seg-imx678",
+)
+TWO_STAGE_PROFILES = (
+    "chip-two-stage-maixcam",
+    "chip-two-stage-imx678",
+    "chip-two-stage-seg-maixcam",
+    "chip-two-stage-seg-imx678",
+)
+SEG_TWO_STAGE_PROFILES = ("chip-two-stage-seg-maixcam", "chip-two-stage-seg-imx678")
+
 BOX_COLORS = [
     (56, 56, 255),
     (151, 157, 255),
@@ -215,6 +239,9 @@ class Detection:
     x2: float
     y2: float
     score: float
+    polygon: list[tuple[float, float]] | None = None
+    contour: list[tuple[float, float]] | None = None
+    area: float | None = None
 
 
 @dataclass(slots=True)
@@ -396,12 +423,20 @@ def build_remote_command(args: argparse.Namespace) -> str:
         stream_parts.extend(["--format", args.camera_format])
     if args.roi:
         stream_parts.extend(["--roi", args.roi])
-    if args.profile == "chip-two-stage-maixcam":
+    if args.profile in TWO_STAGE_PROFILES:
+        defect_model_kind = getattr(args, "defect_model_kind", None) or (
+            "seg" if args.profile in SEG_TWO_STAGE_PROFILES else "detect"
+        )
+        defect_model = getattr(args, "remote_defect_model", None) or (
+            CHIP_DEFECT_SEG_REMOTE_MODEL if defect_model_kind == "seg" else CHIP_REMOTE_MODEL
+        )
         stream_parts.extend(
             [
                 "--two-stage",
                 "--defect-model",
-                CHIP_REMOTE_MODEL,
+                defect_model,
+                "--defect-model-kind",
+                defect_model_kind,
                 "--chip-conf",
                 args.chip_conf,
                 "--defect-conf",
@@ -521,6 +556,70 @@ def read_exact(stream: BinaryIO, size: int) -> bytes:
     return bytes(chunks)
 
 
+def polygon_area(points: list[tuple[float, float]]) -> float:
+    if len(points) < 3:
+        return 0.0
+    area = 0.0
+    previous_x, previous_y = points[-1]
+    for x, y in points:
+        area += previous_x * y - x * previous_y
+        previous_x, previous_y = x, y
+    return abs(area) * 0.5
+
+
+def parse_detection_contours(
+    data: bytes,
+    detections: list[Detection],
+    width: int,
+    height: int,
+) -> list[Detection]:
+    """Parse a future RYL1 contour block and attach per-detection points.
+
+    Proposed block layout: for each detection, uint32 point_count followed by
+    point_count float32 x,y pairs. Coordinates may be pixels or normalized 0..1.
+    """
+    offset = 0
+    parsed: list[Detection] = []
+    for detection in detections:
+        if offset + CONTOUR_POINT_COUNT_STRUCT.size > len(data):
+            raise ProtocolError("short contour block while reading point count")
+        (point_count,) = CONTOUR_POINT_COUNT_STRUCT.unpack_from(data, offset)
+        offset += CONTOUR_POINT_COUNT_STRUCT.size
+        point_bytes = point_count * CONTOUR_POINT_STRUCT.size
+        if offset + point_bytes > len(data):
+            raise ProtocolError("short contour block while reading points")
+
+        contour: list[tuple[float, float]] = []
+        for _ in range(point_count):
+            x, y = CONTOUR_POINT_STRUCT.unpack_from(data, offset)
+            offset += CONTOUR_POINT_STRUCT.size
+            if not math.isfinite(x) or not math.isfinite(y):
+                continue
+            contour.append((x, y))
+
+        if contour:
+            normalized = normalize_points(contour, width, height)
+            parsed.append(
+                Detection(
+                    detection.class_id,
+                    detection.x1,
+                    detection.y1,
+                    detection.x2,
+                    detection.y2,
+                    detection.score,
+                    polygon=contour,
+                    contour=contour,
+                    area=polygon_area(normalized),
+                )
+            )
+        else:
+            parsed.append(detection)
+
+    if offset != len(data):
+        raise ProtocolError(f"contour block has {len(data) - offset} trailing bytes")
+    return parsed
+
+
 def read_stream_frame(stream: BinaryIO, remote_log: str) -> StreamFrame | None:
     header = read_exact(stream, HEADER_STRUCT.size)
     if not header:
@@ -528,7 +627,7 @@ def read_stream_frame(stream: BinaryIO, remote_log: str) -> StreamFrame | None:
     if len(header) != HEADER_STRUCT.size:
         raise ProtocolError(f"short header: expected {HEADER_STRUCT.size} bytes, got {len(header)}")
 
-    magic, width, height, frame_index, det_count, payload_size = HEADER_STRUCT.unpack(header)
+    magic, width, height, frame_index, raw_det_count, payload_size = HEADER_STRUCT.unpack(header)
     if magic != MAGIC:
         preview = header[: min(len(header), 16)].hex(" ")
         raise ProtocolError(
@@ -539,6 +638,8 @@ def read_stream_frame(stream: BinaryIO, remote_log: str) -> StreamFrame | None:
 
     if width <= 0 or height <= 0 or width % 2 != 0 or height % 2 != 0:
         raise ProtocolError(f"invalid NV12 frame size from stream: {width}x{height}")
+    has_contours = bool(raw_det_count & DETECTION_CONTOURS_FLAG)
+    det_count = raw_det_count & DETECTION_COUNT_MASK
     if det_count > MAX_DETECTIONS:
         raise ProtocolError(f"invalid detection count: {det_count} > {MAX_DETECTIONS}")
     if payload_size > MAX_PAYLOAD_BYTES:
@@ -560,6 +661,18 @@ def read_stream_frame(stream: BinaryIO, remote_log: str) -> StreamFrame | None:
     for offset in range(0, box_bytes_size, BOX_STRUCT.size):
         class_id, score, x1, y1, x2, y2 = BOX_STRUCT.unpack_from(box_bytes, offset)
         detections.append(Detection(class_id, x1, y1, x2, y2, score))
+
+    if has_contours:
+        contour_size_bytes = read_exact(stream, CONTOUR_BLOCK_SIZE_STRUCT.size)
+        if len(contour_size_bytes) != CONTOUR_BLOCK_SIZE_STRUCT.size:
+            raise ProtocolError("short contour block size")
+        (contour_block_size,) = CONTOUR_BLOCK_SIZE_STRUCT.unpack(contour_size_bytes)
+        if contour_block_size > MAX_PAYLOAD_BYTES:
+            raise ProtocolError(f"contour block too large: {contour_block_size} bytes")
+        contour_bytes = read_exact(stream, contour_block_size)
+        if len(contour_bytes) != contour_block_size:
+            raise ProtocolError(f"short contour block: expected {contour_block_size} bytes, got {len(contour_bytes)}")
+        detections = parse_detection_contours(contour_bytes, detections, width, height)
 
     payload = read_exact(stream, payload_size)
     if len(payload) != payload_size:
@@ -615,6 +728,26 @@ def apply_preview_adjustments(image: np.ndarray, args: argparse.Namespace) -> np
     return result
 
 
+def detection_points(detection: Detection) -> list[tuple[float, float]] | None:
+    return detection.contour or detection.polygon
+
+
+def normalize_points(points: list[tuple[float, float]], width: int, height: int) -> list[tuple[float, float]]:
+    finite = [(float(x), float(y)) for x, y in points if math.isfinite(float(x)) and math.isfinite(float(y))]
+    if not finite:
+        return []
+    max_coord = max(max(abs(x), abs(y)) for x, y in finite)
+    scale_x = float(width) if max_coord <= 1.5 else 1.0
+    scale_y = float(height) if max_coord <= 1.5 else 1.0
+    return [
+        (
+            max(0.0, min(float(width - 1), x * scale_x)),
+            max(0.0, min(float(height - 1), y * scale_y)),
+        )
+        for x, y in finite
+    ]
+
+
 def normalized_box(detection: Detection, width: int, height: int) -> Detection | None:
     values = (detection.x1, detection.y1, detection.x2, detection.y2, detection.score)
     if not all(math.isfinite(value) for value in values):
@@ -640,7 +773,22 @@ def normalized_box(detection: Detection, width: int, height: int) -> Detection |
 
     if x2 <= x1 or y2 <= y1:
         return None
-    return Detection(detection.class_id, x1, y1, x2, y2, detection.score)
+    points = detection_points(detection)
+    contour = normalize_points(points, width, height) if points else None
+    area = detection.area
+    if contour and (area is None or area <= 0):
+        area = polygon_area(contour)
+    return Detection(
+        detection.class_id,
+        x1,
+        y1,
+        x2,
+        y2,
+        detection.score,
+        polygon=contour,
+        contour=contour,
+        area=area,
+    )
 
 
 def box_iou(a: Detection, b: Detection) -> float:
@@ -791,7 +939,7 @@ def filter_display_detections(
     height: int,
     args: argparse.Namespace,
 ) -> list[Detection]:
-    if args.profile != "chip-two-stage-maixcam" or args.no_display_filter:
+    if args.profile not in TWO_STAGE_PROFILES or args.no_display_filter:
         return detections
 
     normalized = [
@@ -849,14 +997,36 @@ def put_label(
     )
 
 
+def draw_detection_masks(image: np.ndarray, detections: list[Detection], alpha: float = 0.28) -> None:
+    if np is None:
+        return
+    overlay = image.copy()
+    any_mask = False
+    for detection in detections:
+        points = detection_points(detection)
+        if not points:
+            continue
+        contour = normalize_points(points, image.shape[1], image.shape[0])
+        if len(contour) < 3:
+            continue
+        pts = np.array([[int(round(x)), int(round(y))] for x, y in contour], dtype=np.int32)
+        color = class_color(detection.class_id)
+        cv2.fillPoly(overlay, [pts], color)
+        any_mask = True
+    if any_mask:
+        cv2.addWeighted(overlay, alpha, image, 1.0 - alpha, 0, dst=image)
+
+
 def draw_detections(image: np.ndarray, detections: list[Detection], class_names: list[str]) -> int:
     height, width = image.shape[:2]
+    normalized_detections = [
+        detection
+        for detection in (normalized_box(raw_detection, width, height) for raw_detection in detections)
+        if detection is not None
+    ]
+    draw_detection_masks(image, normalized_detections)
     drawn = 0
-    for raw_detection in detections:
-        detection = normalized_box(raw_detection, width, height)
-        if detection is None:
-            continue
-
+    for detection in normalized_detections:
         color = class_color(detection.class_id)
         x1 = int(round(detection.x1))
         y1 = int(round(detection.y1))
@@ -867,6 +1037,12 @@ def draw_detections(image: np.ndarray, detections: list[Detection], class_names:
         label = f"{class_name(detection.class_id, class_names)} {score_text}"
 
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+        points = detection_points(detection)
+        if points:
+            contour = normalize_points(points, width, height)
+            if len(contour) >= 2:
+                pts = np.array([[int(round(x)), int(round(y))] for x, y in contour], dtype=np.int32)
+                cv2.polylines(image, [pts], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
         put_label(image, label, x1, y1, color)
         drawn += 1
     return drawn
@@ -941,6 +1117,14 @@ def profile_defaults(profile: str) -> tuple[str, str, str, list[str], str]:
             CHIP_DEFECT_CLASSES,
             "RKNN Chip Defect MaixCAM Live",
         )
+    if profile == "chip-defect-imx678":
+        return (
+            CHIP_REMOTE_WORKDIR,
+            CHIP_MAIXCAM_REMOTE_BINARY,
+            CHIP_REMOTE_MODEL,
+            CHIP_DEFECT_CLASSES,
+            "RKNN Chip Defect IMX678 UVC Live",
+        )
     if profile == "chip-roi":
         return (
             CHIP_REMOTE_WORKDIR,
@@ -957,6 +1141,14 @@ def profile_defaults(profile: str) -> tuple[str, str, str, list[str], str]:
             CHIP_ROI_CLASSES,
             "RKNN Chip ROI MaixCAM Live",
         )
+    if profile == "chip-roi-imx678":
+        return (
+            CHIP_REMOTE_WORKDIR,
+            CHIP_ROI_MAIXCAM_REMOTE_BINARY,
+            CHIP_ROI_REMOTE_MODEL,
+            CHIP_ROI_CLASSES,
+            "RKNN Chip ROI IMX678 UVC Live",
+        )
     if profile == "chip-two-stage-maixcam":
         return (
             CHIP_REMOTE_WORKDIR,
@@ -964,6 +1156,30 @@ def profile_defaults(profile: str) -> tuple[str, str, str, list[str], str]:
             CHIP_ROI_REMOTE_MODEL,
             CHIP_TWO_STAGE_CLASSES,
             "RKNN Chip Two-Stage MaixCAM Live",
+        )
+    if profile == "chip-two-stage-imx678":
+        return (
+            CHIP_REMOTE_WORKDIR,
+            CHIP_TWO_STAGE_MAIXCAM_REMOTE_BINARY,
+            CHIP_ROI_REMOTE_MODEL,
+            CHIP_TWO_STAGE_CLASSES,
+            "RKNN Chip Two-Stage IMX678 UVC Live",
+        )
+    if profile == "chip-two-stage-seg-maixcam":
+        return (
+            CHIP_REMOTE_WORKDIR,
+            CHIP_TWO_STAGE_MAIXCAM_REMOTE_BINARY,
+            CHIP_ROI_REMOTE_MODEL,
+            CHIP_TWO_STAGE_CLASSES,
+            "RKNN Chip Two-Stage Seg MaixCAM Live",
+        )
+    if profile == "chip-two-stage-seg-imx678":
+        return (
+            CHIP_REMOTE_WORKDIR,
+            CHIP_TWO_STAGE_MAIXCAM_REMOTE_BINARY,
+            CHIP_ROI_REMOTE_MODEL,
+            CHIP_TWO_STAGE_CLASSES,
+            "RKNN Chip Two-Stage Seg IMX678 UVC Live",
         )
     return (
         CHIP_REMOTE_WORKDIR,
@@ -993,13 +1209,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--serial", default=DEFAULT_SERIAL, help="ADB serial; pass an empty string to omit -s")
     parser.add_argument(
         "--profile",
-        choices=("chip-defect", "chip-defect-maixcam", "chip-roi", "chip-roi-maixcam", "chip-two-stage-maixcam", "yolo11"),
+        choices=(
+            "chip-defect",
+            "chip-defect-maixcam",
+            "chip-defect-imx678",
+            "chip-roi",
+            "chip-roi-maixcam",
+            "chip-roi-imx678",
+            "chip-two-stage-maixcam",
+            "chip-two-stage-imx678",
+            "chip-two-stage-seg-maixcam",
+            "chip-two-stage-seg-imx678",
+            "yolo11",
+        ),
         default=DEFAULT_PROFILE,
         help="Remote binary/model/label preset",
     )
     parser.add_argument("--remote-workdir", help="Board working directory")
     parser.add_argument("--remote-binary", help="Board stream binary path relative to remote workdir")
     parser.add_argument("--remote-model", help="Board RKNN model path relative to remote workdir")
+    parser.add_argument("--remote-defect-model", help="Board defect RKNN model path for two-stage streams")
+    parser.add_argument(
+        "--defect-model-kind",
+        choices=("detect", "seg"),
+        help="Board defect postprocess kind for two-stage streams",
+    )
     parser.add_argument("--labels", type=Path, help="Local label file for drawing class names")
     parser.add_argument("--width", type=positive_int, default=DEFAULT_WIDTH, help="Board camera stream width")
     parser.add_argument("--height", type=positive_int, default=DEFAULT_HEIGHT, help="Board camera stream height")
@@ -1072,20 +1306,27 @@ def parse_args() -> argparse.Namespace:
     args.remote_workdir = args.remote_workdir or default_workdir
     args.remote_binary = args.remote_binary or default_binary
     args.remote_model = args.remote_model or default_model
+    if args.defect_model_kind is None:
+        args.defect_model_kind = "seg" if args.profile in SEG_TWO_STAGE_PROFILES else "detect"
+    if args.remote_defect_model is None:
+        args.remote_defect_model = CHIP_DEFECT_SEG_REMOTE_MODEL if args.defect_model_kind == "seg" else CHIP_REMOTE_MODEL
     args.default_class_names = default_labels
     args.window_name = args.window_name or default_window
     if args.smooth_boxes is None:
-        args.smooth_boxes = args.profile == "chip-two-stage-maixcam"
+        args.smooth_boxes = args.profile in TWO_STAGE_PROFILES and args.defect_model_kind != "seg"
+    if args.defect_model_kind == "seg" and args.smooth_boxes:
+        print("seg defect model disables --smooth-boxes so contour masks are preserved", file=sys.stderr)
+        args.smooth_boxes = False
     if args.defect_conf is None:
-        args.defect_conf = DEFAULT_TWO_STAGE_DEFECT_CONF if args.profile == "chip-two-stage-maixcam" else args.conf
+        args.defect_conf = DEFAULT_TWO_STAGE_DEFECT_CONF if args.profile in TWO_STAGE_PROFILES else args.conf
     if args.input_adjust is None:
-        args.input_adjust = args.profile == "chip-two-stage-maixcam"
+        args.input_adjust = args.profile in TWO_STAGE_PROFILES
     args.input_contrast = max(0.0, min(float(args.input_contrast), 5.0))
     args.input_gamma = max(0.05, min(float(args.input_gamma), 5.0))
     args.input_saturation = max(0.0, min(float(args.input_saturation), 5.0))
     args.input_sharpness = max(0.0, min(float(args.input_sharpness), 3.0))
 
-    if args.profile in ("chip-defect-maixcam", "chip-roi-maixcam", "chip-two-stage-maixcam"):
+    if args.profile in UVC_CHIP_PROFILES:
         if args.device == REMOTE_DEVICE:
             args.device = "/dev/video73"
         if args.width == DEFAULT_WIDTH:

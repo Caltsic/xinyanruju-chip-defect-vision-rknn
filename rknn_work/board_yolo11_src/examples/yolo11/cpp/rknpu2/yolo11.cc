@@ -281,3 +281,93 @@ out:
 
     return ret;
 }
+
+int inference_yolo11_seg_model(rknn_app_context_t *app_ctx, image_buffer_t *img, object_seg_result_list *seg_results, object_detect_result_list *bbox_fallback)
+{
+    int ret = 0;
+    image_buffer_t dst_img;
+    letterbox_t letter_box;
+
+    if ((!app_ctx) || !(img) || (!seg_results) || (!bbox_fallback))
+    {
+        return -1;
+    }
+
+    rknn_input inputs[app_ctx->io_num.n_input];
+    rknn_output outputs[app_ctx->io_num.n_output];
+    const float nms_threshold = app_ctx->nms_threshold > 0 ? app_ctx->nms_threshold : NMS_THRESH;
+    const float box_conf_threshold = app_ctx->box_conf_threshold > 0 ? app_ctx->box_conf_threshold : BOX_THRESH;
+    int bg_color = 114;
+
+    memset(seg_results, 0x00, sizeof(*seg_results));
+    memset(bbox_fallback, 0x00, sizeof(*bbox_fallback));
+    memset(&letter_box, 0, sizeof(letterbox_t));
+    memset(&dst_img, 0, sizeof(image_buffer_t));
+    memset(inputs, 0, sizeof(inputs));
+    memset(outputs, 0, sizeof(outputs));
+
+    dst_img.width = app_ctx->model_width;
+    dst_img.height = app_ctx->model_height;
+    dst_img.format = IMAGE_FORMAT_RGB888;
+    dst_img.size = get_image_size(&dst_img);
+    dst_img.virt_addr = (unsigned char *)malloc(dst_img.size);
+    if (dst_img.virt_addr == NULL)
+    {
+        printf("malloc buffer size:%d fail!\n", dst_img.size);
+        return -1;
+    }
+
+    ret = convert_image_with_letterbox(img, &dst_img, &letter_box, bg_color);
+    if (ret < 0)
+    {
+        printf("convert_image_with_letterbox fail! ret=%d\n", ret);
+        goto out;
+    }
+
+    inputs[0].index = 0;
+    inputs[0].type = RKNN_TENSOR_UINT8;
+    inputs[0].fmt = RKNN_TENSOR_NHWC;
+    inputs[0].size = app_ctx->model_width * app_ctx->model_height * app_ctx->model_channel;
+    inputs[0].buf = dst_img.virt_addr;
+
+    ret = rknn_inputs_set(app_ctx->rknn_ctx, app_ctx->io_num.n_input, inputs);
+    if (ret < 0)
+    {
+        printf("rknn_input_set fail! ret=%d\n", ret);
+        goto out;
+    }
+
+    printf("rknn_run\n");
+    ret = rknn_run(app_ctx->rknn_ctx, nullptr);
+    if (ret < 0)
+    {
+        printf("rknn_run fail! ret=%d\n", ret);
+        goto out;
+    }
+
+    memset(outputs, 0, sizeof(outputs));
+    for (int i = 0; i < app_ctx->io_num.n_output; i++)
+    {
+        outputs[i].index = i;
+        outputs[i].want_float = (!app_ctx->is_quant ||
+                                  (app_ctx->output_attrs[i].type != RKNN_TENSOR_INT8 &&
+                                   app_ctx->output_attrs[i].type != RKNN_TENSOR_UINT8));
+    }
+    ret = rknn_outputs_get(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs, NULL);
+    if (ret < 0)
+    {
+        printf("rknn_outputs_get fail! ret=%d\n", ret);
+        goto out;
+    }
+
+    ret = post_process_seg(app_ctx, outputs, &letter_box, box_conf_threshold, nms_threshold, seg_results, bbox_fallback);
+    rknn_outputs_release(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs);
+
+out:
+    if (dst_img.virt_addr != NULL)
+    {
+        free(dst_img.virt_addr);
+    }
+
+    return ret;
+}

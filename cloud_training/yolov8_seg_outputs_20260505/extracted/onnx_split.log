@@ -1,0 +1,1 @@
+wrote outputs/final/chipcheck_yolov8_seg_split.onnx: boxes=[1, 4, 8400], scores=[1, 4, 8400], mask_coeffs=[1, 32, 8400], protos=[1, 32, 160, 160], class_count=4, mask_count=32, axis=1

@@ -1,0 +1,10 @@
+{
+  "weights": "/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/chipcheck_yolov8_seg.pt",
+  "output": "/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/chipcheck_yolov8_seg.onnx",
+  "task": "segment",
+  "imgsz": 640,
+  "opset": 12,
+  "exporter": "standard_ultralytics_fallback",
+  "rockchip_error": "Rockchip ultralytics fork not found: /root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/third_party/ultralytics_yolov8. Pass --auto-clone or clone https://github.com/airockchip/ultralytics_yolov8.git first.",
+  "source_onnx": "/root/autodl-tmp/chipcheck_seg_20260505/chipcheck_seg_run/cloud_training/yolov8_seg_rknn/outputs/final/chipcheck_yolov8_seg.onnx"
+}

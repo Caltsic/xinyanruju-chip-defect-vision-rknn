@@ -394,3 +394,27 @@ F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-s
 - `display_max_defects=20` 用于避免日常观察被 top-k 限制；`--display-max-defects 0` 表示保留显示 NMS 但不做数量截断。
 - `defect_conf=0.45` 是当前实拍破损芯片画面的平衡点；`0.50` 已开始漏 broken，`0.35` 以下更适合诊断召回。
 - `defect_confirm=3` 比 `2` 更偏稳定，代价是新缺陷框出现稍慢。
+## 追加计划：chip_capture_gui 双后端与板端 OpenCV 简化界面
+更新时间：2026-05-05
+
+### 背景
+
+7 寸 HDMI LCD 已在泰山派 3M 上通过 `1280x720 + RGB + force_dvi` 正常显示。用户希望现场不依赖 PC 窗口，直接在板端显示器上查看二阶段芯片检测画面，同时保留已有 PC 端 `chip_capture_gui` 的采集标注能力。因此本轮目标是把相机/灯光链路抽象成双后端，并新增一个不依赖 PyQt5 的 OpenCV 简化交互界面。
+
+### 阶段
+
+| 阶段 | 状态 | 说明 |
+|---|---|---|
+| 1. 双后端方案定界 | complete | PC 端继续 ADB exec-out；板端 local 后端直接启动 `/userdata/rknn_yolo11_demo/rknn_chip_two_stage_maixcam_stream` |
+| 2. 相机/灯光后端拆分 | complete | `CameraSettings.backend=adb/local`，相机、input-adjust 和 WS2812 控制均支持本地执行 |
+| 3. OpenCV 简化界面 | complete | 板端使用 `cv2.imshow` 显示检测框、状态、快捷键调参、Capture ROI、Accept/Negative |
+| 4. 文档与部署说明 | complete | README、history、progress 记录启动命令、限制和验证结果 |
+| 5. 验证 | complete | 本地 py_compile、板端 py_compile、本地后端 3 帧烟测、OpenCV HDMI 短跑均通过 |
+
+### 关键决策
+
+- 不强行在板端安装 PyQt5；板端现场入口优先使用 OpenCV QT5 后端，当前系统已具备 `cv2` 和 `numpy`。
+- 现有 Windows PyQt GUI 保留，默认后端仍是 `adb`，避免影响已经可用的采集标注流程。
+- OpenCV 简化界面复用现有 `CaptureStorage`、chip ROI 初框算法和二阶段检测框绘制逻辑，保证样本输出目录结构仍是 `chip_roi/generated/gui_capture/`。
+- OpenCV 界面只纳入现场最需要的快捷交互：实时框显示、Pins/Text/Damage/Reset 预设、亮度/对比度/gamma/饱和度/锐化微调、补光亮度微调、Capture ROI、W/A/S/D/+- 调框、Enter 接受、Delete 负样本。
+- `Denoise/CLAHE` 继续不参与板端 NPU 输入；OpenCV 现场入口也不把它们作为实时调参重点。

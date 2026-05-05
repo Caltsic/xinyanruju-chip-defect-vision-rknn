@@ -77,6 +77,19 @@ DeviceOpen using default: no devices found
 
 ## MaixCAM ROI 与预处理发现
 
+- IMX678 新模组当前是 USB UVC 形态，板端识别为 `DECXIN CAMERA (1bcf:2cd1)`，视频节点 `/dev/video73`，metadata 节点 `/dev/video74`。
+- IMX678 UVC 支持 `MJPG 1280x720 @ 60`、`1920x1080 @ 60`、`3840x2160 @ 30`；实时检测默认仍先用 `1280x720` 控制解码和预处理成本。
+- `chip-two-stage-imx678` 已跑通二阶段 INT8 烟测，截图为 `captures/imx678_profile_two_stage_annotated.jpg`；当前画面可出 `chip 0.63` 和 `broken 0.74`，但 `focus` 约 `3`，明显虚焦。
+- `chip_capture_gui` 已支持双后端：Windows 默认 `adb`，板端可用 `local` 后端直接启动 `/userdata/rknn_yolo11_demo/rknn_chip_two_stage_maixcam_stream` 并读取同一套 RYL1 stdout 协议。
+- 板端 HDMI 现场入口为 OpenCV 简化界面：
+
+```bash
+cd /userdata/chipcheck_vision
+python3 -m tools.chip_capture_gui --opencv --backend local --fullscreen
+```
+
+- OpenCV 界面不依赖 PyQt5，适合当前板端环境；快捷键覆盖实时框显示、Pins/Text/Damage/Reset、参数微调、补光亮度、Capture ROI、ROI 复核和 Accept/Negative。
+- 板端本地后端烟测结果：`/dev/video73`、二阶段 stream binary、`/dev/spidev1.0` 均存在，3 帧 `1280x720` 读取成功；短跑 OpenCV 窗口后无残留进程。
 - 当前缺陷模型类别只有 `ZF-scratch`、`scratch`、`broken`、`pinbreak`，没有 `chip` 类；全画面检测不会框整颗芯片。
 - 当前破损芯片全图直接送模型时，ONNX 在可见破损 ROI 的 `broken` 响应约 `0.00010`；板端 INT8 RKNN 即使降到 `conf=0.0001` 也无框。
 - 同一张实拍图裁出芯片 ROI 后，ONNX 可给出可用响应，证明当前画面不是完全不可识别，而是尺度/ROI 问题优先。

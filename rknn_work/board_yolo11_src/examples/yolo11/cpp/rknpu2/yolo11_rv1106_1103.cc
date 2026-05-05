@@ -232,3 +232,14 @@ int inference_yolo11_model(rknn_app_context_t *app_ctx, image_buffer_t *img, obj
 out:
     return ret;
 }
+
+int inference_yolo11_seg_model(rknn_app_context_t *app_ctx, image_buffer_t *img, object_seg_result_list *seg_results, object_detect_result_list *bbox_fallback)
+{
+    if (seg_results == NULL || bbox_fallback == NULL)
+    {
+        return -1;
+    }
+    memset(seg_results, 0x00, sizeof(*seg_results));
+    seg_results->mask_status = 1;
+    return inference_yolo11_model(app_ctx, img, bbox_fallback);
+}

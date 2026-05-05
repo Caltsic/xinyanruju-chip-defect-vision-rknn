@@ -81,6 +81,7 @@ static_assert(sizeof(float) == 4, "protocol requires 32-bit float");
 
 const char kDefaultModel[] = DEFAULT_MODEL_PATH;
 const char kDefaultDefectModel[] = DEFAULT_DEFECT_MODEL_PATH;
+const char kDefaultSegDefectModel[] = "model/chipcheck_yolov8_seg_split_int8.rknn";
 const char kDefaultDevice[] = DEFAULT_DEVICE_PATH;
 const char kDefaultFormat[] = DEFAULT_CAMERA_FORMAT;
 const uint32_t kDefaultWidth = DEFAULT_CAMERA_WIDTH;
@@ -97,6 +98,10 @@ const float kDefaultRoiMargin = 0.08f;
 const char kDefaultInputAdjustFile[] = "/tmp/chip_input_adjust.conf";
 const uint32_t kMaxPayloadSize = std::numeric_limits<uint32_t>::max();
 const char kProtocolMagic[] = "RYL1";
+const char kSegSidecarMagic[] = "RYLS";
+const uint32_t kSegSidecarVersion = 1;
+const uint32_t kSegMaskStatusBboxFallback = 1;
+const uint32_t kDetectionContoursFlag = 0x80000000U;
 
 enum CameraInputFormat {
     CAMERA_INPUT_NV12,
@@ -107,6 +112,8 @@ enum CameraInputFormat {
 struct Options {
     std::string model;
     std::string defect_model;
+    bool defect_model_explicit;
+    std::string seg_sidecar;
     std::string device;
     std::string format;
     uint32_t width;
@@ -121,6 +128,9 @@ struct Options {
     uint32_t roi_w;
     uint32_t roi_h;
     bool two_stage;
+    yolo_model_kind_t defect_model_kind;
+    bool stream_contours;
+    bool stream_contours_explicit;
     float conf_threshold;
     float chip_conf_threshold;
     float defect_conf_threshold;
@@ -147,6 +157,8 @@ struct Options {
     Options()
         : model(kDefaultModel),
           defect_model(kDefaultDefectModel),
+          defect_model_explicit(false),
+          seg_sidecar(),
           device(kDefaultDevice),
           format(kDefaultFormat),
           width(kDefaultWidth),
@@ -161,6 +173,9 @@ struct Options {
           roi_w(0),
           roi_h(0),
           two_stage(DEFAULT_TWO_STAGE != 0),
+          defect_model_kind(YOLO_MODEL_KIND_DETECT),
+          stream_contours(false),
+          stream_contours_explicit(false),
           conf_threshold(kDefaultConfThreshold),
           chip_conf_threshold(kDefaultChipConfThreshold),
           defect_conf_threshold(kDefaultDefectConfThreshold),
@@ -320,7 +335,8 @@ static void print_usage(const char *prog)
     fprintf(stderr,
             "Usage: %s [--model PATH] [--device NODE] [--format yuyv|mjpg] [--width N] [--height N] "
             "[--fps N] [--frames N] [--skip N] [--buffers N] [--roi X,Y,W,H] [--conf F] [--nms F] "
-            "[--two-stage] [--defect-model PATH] [--chip-conf F] [--defect-conf F] [--roi-margin F] "
+            "[--two-stage] [--defect-model PATH] [--defect-model-kind detect|seg] [--stream-contours|--no-stream-contours] [--seg-sidecar PATH] "
+            "[--chip-conf F] [--defect-conf F] [--roi-margin F] "
             "[--roi-smooth-alpha F] [--roi-hold N] [--chip-interval N] [--defect-interval N] "
             "[--defect-confirm N] [--defect-hold N] [--defect-smooth-alpha F] "
             "[--defect-match-iou F] [--defect-match-center F] [--defect-class-decay F] "
@@ -441,6 +457,30 @@ static bool parse_roi(const char *text, uint32_t *x, uint32_t *y, uint32_t *w, u
     *w = values[2];
     *h = values[3];
     return true;
+}
+
+static bool parse_model_kind(const std::string &text, yolo_model_kind_t *kind)
+{
+    if (text == "detect") {
+        *kind = YOLO_MODEL_KIND_DETECT;
+        return true;
+    }
+    if (text == "seg" || text == "segment" || text == "segmentation") {
+        *kind = YOLO_MODEL_KIND_SEG;
+        return true;
+    }
+    return false;
+}
+
+static const char *model_kind_name(yolo_model_kind_t kind)
+{
+    switch (kind) {
+    case YOLO_MODEL_KIND_DETECT:
+        return "detect";
+    case YOLO_MODEL_KIND_SEG:
+        return "seg";
+    }
+    return "detect";
 }
 
 static bool take_option_value(int argc, char **argv, int *index, const char *name, std::string *value);
@@ -566,6 +606,27 @@ static bool parse_args(int argc, char **argv, Options *opts)
             if (!take_option_value(argc, argv, &i, "--defect-model", &opts->defect_model)) {
                 return false;
             }
+            opts->defect_model_explicit = true;
+        } else if (arg == "--defect-model-kind" || arg.compare(0, 20, "--defect-model-kind=") == 0) {
+            std::string kind;
+            if (!take_option_value(argc, argv, &i, "--defect-model-kind", &kind)) {
+                return false;
+            }
+            if (!parse_model_kind(kind, &opts->defect_model_kind)) {
+                fprintf(stderr, "invalid value for --defect-model-kind: %s; expected detect or seg\n",
+                        kind.c_str());
+                return false;
+            }
+        } else if (arg == "--seg-sidecar" || arg.compare(0, 14, "--seg-sidecar=") == 0) {
+            if (!take_option_value(argc, argv, &i, "--seg-sidecar", &opts->seg_sidecar)) {
+                return false;
+            }
+        } else if (arg == "--stream-contours") {
+            opts->stream_contours = true;
+            opts->stream_contours_explicit = true;
+        } else if (arg == "--no-stream-contours") {
+            opts->stream_contours = false;
+            opts->stream_contours_explicit = true;
         } else if (arg == "--two-stage") {
             opts->two_stage = true;
         } else if (arg == "--device" || arg.compare(0, 9, "--device=") == 0) {
@@ -704,9 +765,19 @@ static bool parse_args(int argc, char **argv, Options *opts)
         fprintf(stderr, "--model must not be empty\n");
         return false;
     }
+    if (!opts->seg_sidecar.empty() && opts->defect_model_kind != YOLO_MODEL_KIND_SEG) {
+        fprintf(stderr, "--seg-sidecar is only valid with --defect-model-kind seg\n");
+        return false;
+    }
+    if (opts->defect_model_kind == YOLO_MODEL_KIND_SEG && !opts->defect_model_explicit) {
+        opts->defect_model = kDefaultSegDefectModel;
+    }
     if (opts->two_stage && opts->defect_model.empty()) {
         fprintf(stderr, "--defect-model must not be empty in --two-stage mode\n");
         return false;
+    }
+    if (opts->defect_model_kind == YOLO_MODEL_KIND_SEG && !opts->stream_contours_explicit) {
+        opts->stream_contours = true;
     }
     if (opts->device.empty()) {
         fprintf(stderr, "--device must not be empty\n");
@@ -1646,6 +1717,122 @@ static bool write_frame_packet(int stream_fd, uint32_t width, uint32_t height, u
            write_all(stream_fd, frame.data(), frame.size());
 }
 
+static bool write_seg_sidecar_packet(int fd, uint32_t width, uint32_t height, uint32_t frame_index,
+                                     const object_detect_result_list &bbox_fallback)
+{
+    uint32_t det_count = 0;
+    if (bbox_fallback.count > 0) {
+        det_count = static_cast<uint32_t>(bbox_fallback.count);
+        if (det_count > OBJ_NUMB_MAX_SIZE) {
+            det_count = OBJ_NUMB_MAX_SIZE;
+        }
+    }
+
+    std::vector<uint8_t> payload;
+    payload.reserve(4 + 7 * sizeof(uint32_t) + det_count * (8 * sizeof(uint32_t) + 5 * sizeof(float)));
+    payload.insert(payload.end(), kSegSidecarMagic, kSegSidecarMagic + 4);
+    append_u32_le(&payload, kSegSidecarVersion);
+    append_u32_le(&payload, width);
+    append_u32_le(&payload, height);
+    append_u32_le(&payload, frame_index);
+    append_u32_le(&payload, kSegMaskStatusBboxFallback);
+    append_u32_le(&payload, det_count);
+    append_u32_le(&payload, 0);
+
+    for (uint32_t i = 0; i < det_count; ++i) {
+        const object_detect_result &det = bbox_fallback.results[i];
+        const uint32_t class_id = det.cls_id < 0 ? 0U : static_cast<uint32_t>(det.cls_id);
+        append_u32_le(&payload, class_id);
+        append_f32_le(&payload, det.prop);
+        append_f32_le(&payload, static_cast<float>(det.box.left));
+        append_f32_le(&payload, static_cast<float>(det.box.top));
+        append_f32_le(&payload, static_cast<float>(det.box.right));
+        append_f32_le(&payload, static_cast<float>(det.box.bottom));
+        append_u32_le(&payload, 0);
+        append_u32_le(&payload, 0);
+        append_u32_le(&payload, 0);
+    }
+
+    return write_all(fd, payload.data(), payload.size());
+}
+
+static bool append_seg_contour_points(std::vector<uint8_t> *block,
+                                      const object_seg_result *seg)
+{
+    if (seg == NULL || seg->contour_count <= 0) {
+        append_u32_le(block, 0);
+        return false;
+    }
+
+    const object_seg_contour &contour = seg->contours[0];
+    uint32_t point_count = 0;
+    if (contour.count > 0) {
+        point_count = static_cast<uint32_t>(std::min(contour.count, 64));
+    }
+    append_u32_le(block, point_count);
+    for (uint32_t i = 0; i < point_count; ++i) {
+        append_f32_le(block, static_cast<float>(contour.points[i].x));
+        append_f32_le(block, static_cast<float>(contour.points[i].y));
+    }
+    return point_count >= 3;
+}
+
+static bool write_frame_packet_with_seg_contours(int stream_fd, uint32_t width, uint32_t height, uint32_t frame_index,
+                                                 const object_detect_result_list &results,
+                                                 const object_seg_result_list &seg_results,
+                                                 const std::vector<uint8_t> &frame)
+{
+    uint32_t det_count = 0;
+    if (results.count > 0) {
+        det_count = static_cast<uint32_t>(results.count);
+        if (det_count > OBJ_NUMB_MAX_SIZE) {
+            det_count = OBJ_NUMB_MAX_SIZE;
+        }
+    }
+
+    std::vector<uint8_t> contour_block;
+    contour_block.reserve(det_count * (sizeof(uint32_t) + 16 * 2 * sizeof(float)));
+    bool has_contours = false;
+    for (uint32_t i = 0; i < det_count; ++i) {
+        const object_seg_result *seg = NULL;
+        if (i > 0 && static_cast<int>(i - 1) < seg_results.count) {
+            seg = &seg_results.results[i - 1];
+        }
+        has_contours = append_seg_contour_points(&contour_block, seg) || has_contours;
+    }
+
+    if (!has_contours) {
+        return write_frame_packet(stream_fd, width, height, frame_index, results, frame);
+    }
+
+    std::vector<uint8_t> meta;
+    meta.reserve(4 + 5 * sizeof(uint32_t) + det_count * (sizeof(uint32_t) + 5 * sizeof(float)) +
+                 sizeof(uint32_t) + contour_block.size());
+    meta.insert(meta.end(), kProtocolMagic, kProtocolMagic + 4);
+    append_u32_le(&meta, width);
+    append_u32_le(&meta, height);
+    append_u32_le(&meta, frame_index);
+    append_u32_le(&meta, det_count | kDetectionContoursFlag);
+    append_u32_le(&meta, static_cast<uint32_t>(frame.size()));
+
+    for (uint32_t i = 0; i < det_count; ++i) {
+        const object_detect_result &det = results.results[i];
+        const uint32_t class_id = det.cls_id < 0 ? 0U : static_cast<uint32_t>(det.cls_id);
+        append_u32_le(&meta, class_id);
+        append_f32_le(&meta, det.prop);
+        append_f32_le(&meta, static_cast<float>(det.box.left));
+        append_f32_le(&meta, static_cast<float>(det.box.top));
+        append_f32_le(&meta, static_cast<float>(det.box.right));
+        append_f32_le(&meta, static_cast<float>(det.box.bottom));
+    }
+
+    append_u32_le(&meta, static_cast<uint32_t>(contour_block.size()));
+    meta.insert(meta.end(), contour_block.begin(), contour_block.end());
+
+    return write_all(stream_fd, meta.data(), meta.size()) &&
+           write_all(stream_fd, frame.data(), frame.size());
+}
+
 static int setup_stream_fd()
 {
     fflush(stdout);
@@ -1794,6 +1981,39 @@ static void translate_results_from_roi(object_detect_result_list *results,
         box->right = clamp_i32(box->right + static_cast<int>(offset_x), 0, max_x);
         box->top = clamp_i32(box->top + static_cast<int>(offset_y), 0, max_y);
         box->bottom = clamp_i32(box->bottom + static_cast<int>(offset_y), 0, max_y);
+    }
+}
+
+static void translate_seg_results_from_roi(object_seg_result_list *results,
+                                           uint32_t offset_x, uint32_t offset_y,
+                                           uint32_t image_width, uint32_t image_height)
+{
+    if (results == NULL) {
+        return;
+    }
+
+    object_detect_result_list bbox_results;
+    memset(&bbox_results, 0, sizeof(bbox_results));
+    bbox_results.count = std::min(results->count, OBJ_NUMB_MAX_SIZE);
+    for (int i = 0; i < bbox_results.count; ++i) {
+        bbox_results.results[i] = results->results[i].det;
+    }
+    translate_results_from_roi(&bbox_results, offset_x, offset_y, image_width, image_height);
+    for (int i = 0; i < bbox_results.count; ++i) {
+        results->results[i].det = bbox_results.results[i];
+    }
+
+    const int max_x = static_cast<int>(image_width) - 1;
+    const int max_y = static_cast<int>(image_height) - 1;
+    for (int i = 0; i < results->count && i < OBJ_NUMB_MAX_SIZE; ++i) {
+        object_seg_result *seg = &results->results[i];
+        for (int c = 0; c < seg->contour_count && c < 4; ++c) {
+            object_seg_contour *contour = &seg->contours[c];
+            for (int p = 0; p < contour->count && p < 64; ++p) {
+                contour->points[p].x = clamp_i32(contour->points[p].x + static_cast<int>(offset_x), 0, max_x);
+                contour->points[p].y = clamp_i32(contour->points[p].y + static_cast<int>(offset_y), 0, max_y);
+            }
+        }
     }
 }
 
@@ -2202,6 +2422,7 @@ int main(int argc, char **argv)
     }
 
     int exit_code = 0;
+    int seg_sidecar_fd = -1;
     bool post_process_ready = false;
     bool camera_started = false;
     CameraContext camera;
@@ -2226,6 +2447,9 @@ int main(int argc, char **argv)
     object_detect_result_list cached_defect_results;
     memset(&cached_defect_results, 0, sizeof(cached_defect_results));
     bool has_cached_defect_results = false;
+    object_seg_result_list cached_seg_results;
+    memset(&cached_seg_results, 0, sizeof(cached_seg_results));
+    bool has_cached_seg_results = false;
 
     if (init_post_process() != 0) {
         fprintf(stderr, "init_post_process failed\n");
@@ -2251,6 +2475,20 @@ int main(int argc, char **argv)
         defect_app_ctx.box_conf_threshold = opts.defect_conf_threshold;
         defect_app_ctx.nms_threshold = opts.nms_threshold;
         defect_filter.configure(defect_app_ctx.class_count);
+        if (opts.defect_model_kind == YOLO_MODEL_KIND_SEG) {
+            fprintf(stderr,
+                    "defect model kind=seg: YOLOv8-seg mask contour postprocess is enabled\n");
+        }
+    }
+
+    if (!opts.seg_sidecar.empty()) {
+        seg_sidecar_fd = open(opts.seg_sidecar.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (seg_sidecar_fd < 0) {
+            fprintf(stderr, "open --seg-sidecar failed: %s: %s\n",
+                    opts.seg_sidecar.c_str(), strerror(errno));
+            exit_code = 1;
+            goto out;
+        }
     }
 
     if (!open_camera(opts, &camera)) {
@@ -2272,11 +2510,16 @@ int main(int argc, char **argv)
     }
     if (opts.two_stage) {
         fprintf(stderr,
-                " two_stage=on chip_conf=%.3f defect_conf=%.3f roi_margin=%.3f roi_smooth_alpha=%.3f roi_hold=%u chip_interval=%u defect_interval=%u defect_confirm=%u defect_hold=%u defect_smooth_alpha=%.3f defect_match_iou=%.3f defect_match_center=%.3f defect_class_decay=%.3f",
+                " two_stage=on defect_model_kind=%s chip_conf=%.3f defect_conf=%.3f roi_margin=%.3f roi_smooth_alpha=%.3f roi_hold=%u chip_interval=%u defect_interval=%u defect_confirm=%u defect_hold=%u defect_smooth_alpha=%.3f defect_match_iou=%.3f defect_match_center=%.3f defect_class_decay=%.3f",
+                model_kind_name(opts.defect_model_kind),
                 opts.chip_conf_threshold, opts.defect_conf_threshold, opts.roi_margin,
                 opts.roi_smooth_alpha, opts.roi_hold, opts.chip_interval, opts.defect_interval,
                 opts.defect_confirm, opts.defect_hold, opts.defect_smooth_alpha,
                 opts.defect_match_iou, opts.defect_match_center, opts.defect_class_decay);
+    }
+    if (seg_sidecar_fd >= 0) {
+        fprintf(stderr, " seg_sidecar=%s protocol=RYLSv%u stdout_protocol=RYL1",
+                opts.seg_sidecar.c_str(), kSegSidecarVersion);
     }
     if (opts.input_adjust_enabled) {
         fprintf(stderr,
@@ -2414,18 +2657,39 @@ int main(int argc, char **argv)
 
                     object_detect_result_list defect_results;
                     memset(&defect_results, 0, sizeof(defect_results));
-                    const int defect_ret = inference_yolo11_model(&defect_app_ctx, &defect_image, &defect_results);
+                    int defect_ret = 0;
+                    if (opts.defect_model_kind == YOLO_MODEL_KIND_SEG) {
+                        object_seg_result_list defect_seg_results;
+                        memset(&defect_seg_results, 0, sizeof(defect_seg_results));
+                        defect_ret = inference_yolo11_seg_model(&defect_app_ctx, &defect_image,
+                                                                &defect_seg_results, &defect_results);
+                        if (defect_ret == 0) {
+                            translate_results_from_roi(&defect_results, defect_offset_x, defect_offset_y,
+                                                       opts.width, opts.height);
+                            translate_seg_results_from_roi(&defect_seg_results, defect_offset_x, defect_offset_y,
+                                                           opts.width, opts.height);
+                            cached_defect_results = defect_results;
+                            cached_seg_results = defect_seg_results;
+                            has_cached_defect_results = true;
+                            has_cached_seg_results = true;
+                        }
+                    } else {
+                        defect_ret = inference_yolo11_model(&defect_app_ctx, &defect_image, &defect_results);
+                        if (defect_ret == 0) {
+                            translate_results_from_roi(&defect_results, defect_offset_x, defect_offset_y,
+                                                       opts.width, opts.height);
+                            defect_filter.update(defect_results, opts, opts.width, opts.height,
+                                                 &cached_defect_results);
+                            has_cached_defect_results = true;
+                            has_cached_seg_results = false;
+                        }
+                    }
                     if (defect_ret != 0) {
                         fprintf(stderr, "defect inference failed: ret=%d frame=%u\n", defect_ret, emitted);
                         exit_code = 1;
                         queue_buffer(&camera, buf.index);
                         break;
                     }
-                    translate_results_from_roi(&defect_results, defect_offset_x, defect_offset_y,
-                                               opts.width, opts.height);
-                    defect_filter.update(defect_results, opts, opts.width, opts.height,
-                                         &cached_defect_results);
-                    has_cached_defect_results = true;
                 }
                 if (has_cached_defect_results) {
                     for (int i = 0; i < cached_defect_results.count && i < OBJ_NUMB_MAX_SIZE; ++i) {
@@ -2453,8 +2717,19 @@ int main(int argc, char **argv)
             translate_results_from_roi(&od_results, roi_offset_x, roi_offset_y, opts.width, opts.height);
         }
 
-        if (!write_frame_packet(stream_fd, opts.width, opts.height, emitted, od_results, frame)) {
+        const bool wrote_frame = opts.stream_contours && has_cached_seg_results
+                                     ? write_frame_packet_with_seg_contours(stream_fd, opts.width, opts.height,
+                                                                            emitted, od_results, cached_seg_results, frame)
+                                     : write_frame_packet(stream_fd, opts.width, opts.height, emitted, od_results, frame);
+        if (!wrote_frame) {
             fprintf(stderr, "write stream failed: %s\n", strerror(errno));
+            exit_code = 1;
+            queue_buffer(&camera, buf.index);
+            break;
+        }
+        if (seg_sidecar_fd >= 0 &&
+            !write_seg_sidecar_packet(seg_sidecar_fd, opts.width, opts.height, emitted, od_results)) {
+            fprintf(stderr, "write segmentation sidecar failed: %s\n", strerror(errno));
             exit_code = 1;
             queue_buffer(&camera, buf.index);
             break;
@@ -2476,6 +2751,9 @@ out:
     release_yolo11_model(&rknn_app_ctx);
     if (post_process_ready) {
         deinit_post_process();
+    }
+    if (seg_sidecar_fd >= 0) {
+        close(seg_sidecar_fd);
     }
     close(stream_fd);
     return exit_code;
