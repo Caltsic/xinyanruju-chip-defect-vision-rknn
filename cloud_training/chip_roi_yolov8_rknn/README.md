@@ -94,3 +94,26 @@ outputs/final/
 
 `chip_roi_yolov8_detect_int8.rknn` is the board-side deployment target. Keep the
 FP RKNN and ONNX as debug baselines.
+
+## OBB Training Variant
+
+The scripts directory also includes an OBB training path that converts the
+existing 5-column HBB labels into YOLO OBB 8-point labels. It estimates a
+rotated rectangle near each HBB crop with OpenCV `minAreaRect`; if estimation
+fails, it falls back to the horizontal box represented as four points.
+
+```bash
+python scripts/run_obb.py \
+  --raw-dataset dataset_raw/chip_roi_yolo \
+  --work-dir outputs_obb \
+  --model yolov8n-obb.pt \
+  --imgsz 640 \
+  --epochs 200 \
+  --batch 64 \
+  --device 0 \
+  --overwrite-dataset
+```
+
+The OBB path prepares the dataset, trains `task=obb`, exports ONNX, splits the
+ONNX output into `boxes/angle/scores`, writes preview images and dataset
+reports, and converts FP/INT8 RKNN unless `--skip-rknn` is set.

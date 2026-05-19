@@ -215,13 +215,15 @@ def write_input_adjust_config(settings: CameraSettings) -> None:
     text = input_adjust_config_text(args)
     if settings.backend == "local":
         path = settings.input_adjust_file
-        command = ["sh", "-c", f"cat > {shlex.quote(path)} <<'EOF'\n{text}EOF"]
+        quoted_path = shlex.quote(path)
+        command = ["sh", "-c", f"rm -f {quoted_path}; umask 000; cat > {quoted_path} <<'EOF'\n{text}EOF"]
         result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False)
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout).strip() or "input adjust setup failed")
         return
     if settings.backend == "adb":
-        script = f"cat > {shlex.quote(args.input_adjust_file)} <<'EOF'\n{text}EOF"
+        quoted_path = shlex.quote(args.input_adjust_file)
+        script = f"rm -f {quoted_path}; umask 000; cat > {quoted_path} <<'EOF'\n{text}EOF"
         result = run_adb_shell(args, script, 5.0)
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout).strip() or "input adjust setup failed")

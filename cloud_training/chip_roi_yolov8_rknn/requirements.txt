@@ -2,6 +2,8 @@ setuptools==69.5.1
 ultralytics>=8.2.0,<9
 opencv-python-headless>=4.8
 onnx>=1.14
+onnxscript>=0.3
+onnx_ir>=0.1.12
 onnxruntime>=1.16
 PyYAML>=6.0
 numpy>=1.23,<2.0

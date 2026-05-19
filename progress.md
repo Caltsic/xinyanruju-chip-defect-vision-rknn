@@ -1,5 +1,80 @@
 # Astra Pro Plus 芯片检测执行日志
 
+## 2026-05-12 MiniMind-O CPU-only 语音助手部署
+
+- 用户确认不需要双工语音，目标改为 GUI 按键式流程：开始录音、停止录音、推理、播放回答。
+- 已新增计划文件：
+
+```text
+plans/minimind_o_voice_assistant_20260512.md
+```
+
+- 本轮施工边界：
+  - 不改 RKNN 检测模型。
+  - 不改检测二进制默认路径。
+  - 不让 MiniMind-O/语音助手使用 NPU。
+  - 不开机自启。
+  - 先做音频与 GUI 骨架，完整 MiniMind-O 依赖独立环境接入。
+- 板端音频闭环结果：
+  - `arecord -D hw:0,0 -f S16_LE -r 16000 -c 1 -d 1` 成功，输出 `/userdata/chipcheck_vision/voice_assistant/audio_probe.wav`，约 32KB。
+  - `aplay -D hw:1,0` 直接播放 16k 单声道失败，错误为 HDMI `Channels count non available`。
+  - 改用 `aplay -D plughw:1,0` 播放成功，后续 HDMI 输出默认使用 `plughw:1,0`。
+- 已新增 CPU-only 语音助手骨架：
+  - `tools/chip_capture_gui/voice_assistant.py`
+  - PyQt GUI 增加 `Voice` 区域：`Start Mic`、`Stop Mic`、`Replay`。
+  - OpenCV GUI 增加 `M` 麦克风开始/停止，`B` 重播最近回答。
+  - 默认无 `--voice-command` 时只做安全占位：保存录音、写 `last_result.json`、生成短提示音并通过 `aplay` 播放。
+  - 推理命令可通过 `--voice-command` 后续接入 MiniMind-O，命令占位符为 `{input_wav}`、`{reply_wav}`、`{result_json}`、`{work_dir}`。
+- 本地语法检查通过，使用 `compile(...)`，未生成本地 `__pycache__`。
+- 已同步到板端：
+  - `/userdata/chipcheck_vision/tools/chip_capture_gui/voice_assistant.py`
+  - `/userdata/chipcheck_vision/tools/chip_capture_gui/app.py`
+  - `/userdata/chipcheck_vision/tools/chip_capture_gui/opencv_app.py`
+- 板端模块/占位链路验证通过：
+
+```text
+voice recording
+voice thinking
+voice done
+input_exists=True
+reply_exists=True
+result_exists=True
+```
+
+- GUI 参数验证通过：`python3 -m tools.chip_capture_gui --opencv --backend local --help` 已显示 `--voice-*` 参数。
+- 板端 `compile(...)` 检查通过：
+  - `tools/chip_capture_gui/voice_assistant.py`
+  - `tools/chip_capture_gui/app.py`
+  - `tools/chip_capture_gui/opencv_app.py`
+- 非干扰验证：
+  - 部署后检测基线：`80` 帧，预热后约 `6.1-6.4 FPS`。
+  - 检测 `100` 帧期间并发运行录音、占位推理、HDMI 播放，预热后约 `6.3-6.7 FPS`，输出 `Processed frames: 100`。
+  - 结论：当前占位语音助手不会打断芯片检测，也未观察到持续 FPS 下滑。
+
+## 2026-05-12 yolov8_env 改名隔离测试
+
+- 用户询问 `/srv/rk3576-storage/yolov8_env` 是否可以删除，并要求先改名隔离测试。
+- 检查结论：
+  - 本地仓库未引用 `yolov8_env`。
+  - 板端当前运行进程未使用该环境。
+  - 当前检测 GUI 使用 `/srv/rk3576-storage/miniforge/bin/python3`，不是 `yolov8_env`。
+  - 板端存在 `/usr/local/bin/ycuda` 和 `/usr/local/bin/condaactivate` 的旧快捷引用，隔离后这些旧快捷命令会失效，但不影响当前检测链路。
+- 已执行隔离：
+
+```text
+/srv/rk3576-storage/yolov8_env
+-> /srv/rk3576-storage/yolov8_env.disabled_20260512
+```
+
+- 验证：
+  - `miniforge` 下编译 GUI 相关 Python 文件通过。
+  - `python3 -m tools.chip_capture_gui --opencv --backend local --help` 可显示 `--voice-*` 参数。
+  - 当前实时检测 50 帧通过，`Processed frames: 50`，实时流未中断。
+  - 语音占位链路再次通过：`voice recording -> voice thinking -> voice done`。
+- 当前状态：
+  - 隔离成功，保留可回滚目录 `/srv/rk3576-storage/yolov8_env.disabled_20260512`。
+  - 尚未释放空间；真正释放约 `5.3G` 需要后续删除该 disabled 目录。
+
 ## 2026-05-03
 
 - 完成 Astra 最小硬件验证。

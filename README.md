@@ -356,20 +356,14 @@ captures/roi_defect_closed_loop_capture/maixcam_current_clean_variants.jpg
 F:\anaconda\python.exe -m tools.chip_capture_gui
 ```
 
-Windows 端也可用 OpenCV 简化界面，后端仍走 ADB：
-
-```powershell
-F:\anaconda\python.exe -m tools.chip_capture_gui --opencv --backend adb
-```
-
 泰山派 HDMI 屏可直接用板端本地后端显示，不经过 ADB 拉流：
 
 ```bash
 cd /userdata/chipcheck_vision
-python3 -m tools.chip_capture_gui --opencv --backend local --fullscreen
+/usr/bin/python3 -m tools.chip_capture_gui --board-ui --backend local --profile chip-two-stage-obb-seg-imx678 --screen-width 800 --screen-height 600 --fullscreen
 ```
 
-板端桌面已安装快捷方式 `Chip Check HDMI / 芯片检测 HDMI`，双击即可执行同一入口。桌面快捷方式默认使用 `960x540` 左上角窗口，避免 7 寸屏在 720p HDMI 模式下裁切全屏画面。若点击后无画面，先查看板端日志：
+板端桌面已安装快捷方式 `ChipCheck Qt`，双击即可执行同一入口。桌面快捷方式默认使用 `800x600` Qt 全屏界面。若点击后无画面，先查看板端日志：
 
 ```bash
 tail -80 /tmp/chipcheck-hdmi-gui.log
@@ -381,11 +375,11 @@ GUI 默认启动等价于当前二阶段实时命令的板端流：
 F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-maixcam --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
 ```
 
-界面中的 `Live Detect` 用于实时观察 chip + defect 框，`Capture / Label` 用于关闭检测框专注标注，`Draw detection boxes` 可随时单独开关检测框。`Sync view to NPU input` 默认开启，GUI 会把 `Brightness/Contrast/Gamma/Saturation/Sharpness` 同步写到板端 `/tmp/chip_input_adjust.conf`，因此实时画面与 NPU 输入一致。`Denoise/CLAHE` 不进入 NPU 输入，只作为人工观察或落盘辅助。
+界面中的 `Live Detect` 用于实时观察 chip + defect 结果，`Capture / Label` 用于关闭检测叠加专注 chip ROI 标注，`Draw masks/contours` 和 `Draw boxes` 可分别控制分割掩膜/轮廓与矩形框。`Sync view to NPU input` 默认开启，GUI 会把 `Brightness/Contrast/Gamma/Saturation/Sharpness` 同步写到板端 `/tmp/chip_input_adjust.conf`，因此实时画面与 NPU 输入一致。`Denoise/CLAHE` 不进入 NPU 输入，只作为人工观察或落盘辅助。
 
 `Save adjusted capture` 默认开启，采集时会把当前可见画面保存为标注样本，并在 `meta/*.json` 记录具体参数。
 
-OpenCV 简化界面快捷键：`Tab` 选择 Brightness/Contrast/Gamma/Saturation/Sharpness/Light，`+/-` 微调；`1/2/3/0` 为 Pins/Text/Damage/Reset 预设；`C` 抓图进入 ROI 复核；复核时 `A/D/W/S` 移框、`+/-` 缩放、`Enter` 接受、`Delete` 或 `N` 标负样本、`Q/Esc` 退出。
+人工更换芯片样本采集分割数据时，推荐直接在 GUI 实时画面中使用 `Save Seg Sample`。它会把最新 clean frame 的 chip ROI、当前模型生成的 YOLO-seg 预标注、全图、preview、meta 和 manifest 保存到 `chip_seg/captures/gui_session_YYYYMMDD_HHMMSS/`，同一 GUI 进程内按 `seg_0001...` 递增；未检测到 chip ROI 时不会保存，也不会 fallback 到全图。
 
 ### chip 类定位数据集
 
@@ -522,7 +516,7 @@ bbox-only 行默认跳过并写入 `dataset_report.json`。完整云端流程会
 - `chip_defect_seg_labels.txt`
 - `calib_dataset.txt`
 
-首版分割部署仍沿用二阶段路径：`chip ROI INT8 -> ROI crop -> defect seg INT8`。PC/GUI 侧已兼容 contour 回传并用半透明掩膜绘制；板端 seg hook 可识别 `boxes/scores/mask_coeffs/protos` split 输出和标准 `pred + protos` 输出，使用 mask coeff 与 proto 生成轻量 contour，mask 点过少时回退 bbox contour。
+首版分割部署仍沿用二阶段路径：`chip ROI INT8 -> ROI crop -> defect seg INT8`。PC/GUI 侧已兼容 contour 回传并用半透明掩膜绘制；板端 seg hook 可识别 `boxes/scores/mask_coeffs/protos` split 输出和标准 `pred + protos` 输出。当前 contour 输出已经加入时序滤波和 closed-loop 校验，mask contour 构造失败时不再把 bbox 当作掩膜显示。
 
 2026-05-05 已完成第一轮上板烟测：`rknn_chip_two_stage_maixcam_stream` 已原生重编译并替换到 `/userdata/rknn_yolo11_demo/`，旧二进制备份为 `rknn_chip_two_stage_maixcam_stream.bak_pre_seg_20260505`；`chipcheck_yolov8_seg_split_int8.rknn` 已部署到 `/userdata/rknn_yolo11_demo/model/`。IMX678 UVC 10 帧 headless 测试通过，状态栏 `FPS 8.7 | focus 159 | 1280x720 | det 2/2 | frame 9`，截图中 `scratch 0.56` 已显示分割轮廓/掩膜。
 
@@ -539,10 +533,94 @@ python scripts/run_all.py --raw-dataset dataset_raw/chip_defect_raw --work-dir o
 F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-seg-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
 ```
 
+OBB 兼容 profile 已在 PC/GUI 侧加入，但默认不切换，旧 `chip-two-stage-seg-imx678` 继续作为常规分割入口。需要观察 chip 旋转框时显式选择：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-obb-seg-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20
+```
+
+协议兼容策略：旧 RYL1 bbox-only 和 `DETECTION_CONTOURS_FLAG=0x80000000` contour 块保持不变；PC 端新增保留位 `DETECTION_OBB_FLAG=0x40000000`，对应可选 OBB sidecar 块，每个 detection 记录 `x0,y0,x1,y1,x2,y2,x3,y3,angle` float32。若板端暂时仍通过 contour 块给 `chip` 类传 4 点，PC 端会把该 contour 识别为 `Detection.obb_points`，在 chip-only overlay 中绘制旋转框；缺陷类仍按 contour/mask 显示。旧板端不置 OBB 位时，读取路径与旧 profile 完全一致。
+
+seg profile 默认 `--overlay-mode mask-contour`，显示分割掩膜/轮廓和类别标签，但不显示 defect 矩形框。需要调试矩形框时显式打开：
+
+```powershell
+F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-seg-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.45 --defect-confirm 3 --display-max-defects 20 --overlay-mode all
+```
+
+可用 overlay：
+
+```text
+all           mask + contour + boxes + labels
+mask          filled reliable masks + labels
+contour       contours + labels
+mask-contour  masks + contours + labels, no boxes
+boxes         boxes + labels
+```
+
 分割首轮观察可降低缺陷阈值并关闭确认延迟，便于直接看 contour 是否稳定：
 
 ```powershell
 F:\anaconda\python.exe .\tools\adb_imx415_rknn_live_view.py --profile chip-two-stage-seg-imx678 --conf 0.25 --chip-conf 0.25 --defect-conf 0.30 --defect-confirm 1 --display-max-defects 20
+```
+
+## IMX678 分割实拍与 CVAT 标定流水线
+
+分割精度提升依赖当前 IMX678/UVC、补光和板端 input-adjust 条件下的新实拍数据。`tools/seg_cvat_pipeline.py` 提供三段式辅助流程：
+
+```text
+capture -> package-cvat -> merge-coco
+```
+
+第一轮建议采集 800-1200 张 chip ROI crop，缺陷和正常样本都保留。人工换样本时优先使用 GUI 的 `Save Seg Sample`：看实时掩膜，换好一个芯片后按一次保存一张，避免自动连拍重复采同一颗芯片。`tools/seg_cvat_pipeline.py capture` 适合送料、转盘或画面持续变化的场景；它会复用当前二阶段 seg 实时流，并把当前模型 contour 转成可编辑 YOLO-seg 预标注：
+
+```powershell
+F:\anaconda\python.exe .\tools\seg_cvat_pipeline.py capture --count 1000 --stride 8 --timeout-sec 3600 --light-brightness 0.50 --output-dir .\chip_seg\captures\session_001
+```
+
+输出结构：
+
+```text
+chip_seg/captures/session_001/
+  images/       chip ROI crops for annotation
+  labels/       current model prelabels in YOLO-seg polygon format
+  images_full/  full clean frames for traceability
+  previews/     crop previews with prelabels
+  meta/         frame/crop/light/input-adjust metadata
+  manifest.csv
+```
+
+采集脚本会在开始前写入当前 input-adjust 并设置 WS2812 补光；如需沿用板上已有补光状态，可加 `--no-light-setup`。默认 `--timeout-sec 3600`，长时间采集可调大；若只想做小样本演练，先用 `--count 50 --stride 4`。
+
+按约 100 张一包分发给 CVAT：
+
+```powershell
+F:\anaconda\python.exe .\tools\seg_cvat_pipeline.py package-cvat --input-dir .\chip_seg\captures\session_001 --output-dir .\chip_seg\cvat_tasks\session_001 --chunk-size 100 --zip
+```
+
+每个 `part_*.zip` 内部按 CVAT COCO 任务结构组织为 `images/default/...` 和 `annotations/instances_default.json`，不要再手工多套一层目录后上传。
+
+CVAT 推荐单机/局域网部署；只需一台主机运行 CVAT，标注人员用浏览器访问。类别顺序固定如下；CVAT 里 label name 只填写右侧名称，不要把数字写进名称：
+
+```text
+0 -> ZF-scratch
+1 -> scratch
+2 -> broken
+3 -> pinbreak
+```
+
+标注原则：只标真实可见缺陷区域；正常样本保留空标签；预标注只作为起点，标注员需要增、删、改 polygon/mask。
+
+CVAT 导出 COCO instance segmentation 后合并为 YOLOv8-seg 原始数据集；polygon 和 brush/mask 导出的 RLE 都会被合并脚本转换为 YOLO-seg 多边形：
+
+```powershell
+F:\anaconda\python.exe .\tools\seg_cvat_pipeline.py merge-coco --inputs .\chip_seg\cvat_exports\session_001 --output-dir .\cloud_training\yolov8_seg_rknn\dataset_raw\imx678_seg_session_001 --overwrite
+```
+
+合并后的目录可直接交给分割训练包：
+
+```bash
+cd cloud_training/yolov8_seg_rknn
+python scripts/run_all.py --raw-dataset dataset_raw/imx678_seg_session_001 --work-dir outputs_imx678_seg_session_001 --model yolov8n-seg.pt --imgsz 640 --epochs 150 --device 0 --overwrite-dataset --skip-rknn
 ```
 
 ## 二阶段 chip ROI + defect 实时检测

@@ -52,6 +52,20 @@ dist/
 
 # Cloud run output snapshots are kept locally, not committed by default.
 /cloud_training/chip_roi_outputs_20260504/
+/cloud_training/*outputs*/
+/cloud_training/**/outputs*/
+/cloud_training/**/dataset_raw/
+
+# Local CVAT exports, captures, generated task bundles, and scratch work.
+/chip_seg/
+/chip_roi/cvat_obb_tasks_*/
+/chip_roi/export/
+/chip_roi/generated/
+/chip_roi/review_tasks/
+/tmp/
+
+# Ad-hoc board source bundles copied through the workspace during deployment.
+/board_yolo11_src_*.tar
 
 # Local secrets and machine-specific config
 .env

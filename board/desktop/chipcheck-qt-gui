@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+LOG=/tmp/chipcheck-qt-gui.log
+APP_DIR=/userdata/chipcheck_vision
+PYTHON=/usr/bin/python3
+VOICE_PYTHON=/srv/rk3576-storage/minimind_o_env/bin/python
+VOICE_RUNNER=/userdata/chipcheck_vision/tools/minimind_o_voice_runner.py
+VOICE_COMMAND="$VOICE_PYTHON $VOICE_RUNNER --repo /mnt/eaget/workspace/minimind-o --input-wav {input_wav} --reply-wav {reply_wav} --result-json {result_json} --stream-text {stream_text} --mode audio --max-new-tokens 12 --threads 2 --device cpu --fallback-tone 1"
+
+export DISPLAY="${DISPLAY:-:0}"
+export XAUTHORITY="${XAUTHORITY:-/home/lckfb/.Xauthority}"
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+export QT_QPA_FONTDIR="${QT_QPA_FONTDIR:-/usr/share/fonts/truetype/dejavu}"
+export QT_XCB_GL_INTEGRATION="${QT_XCB_GL_INTEGRATION:-none}"
+export QT_QUICK_BACKEND="${QT_QUICK_BACKEND:-software}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
+export PYTHONPATH="/usr/lib/python3/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+if [ -b /dev/mmcblk1p1 ]; then
+  mkdir -p /mnt/eaget
+  mountpoint -q /mnt/eaget || mount -t vfat -o rw,utf8,umask=000 /dev/mmcblk1p1 /mnt/eaget || true
+fi
+
+mkdir -p "$(dirname "$LOG")"
+{
+  echo "==== $(date '+%Y-%m-%d %H:%M:%S') chipcheck qt gui ===="
+  echo "user=$(id -un) display=$DISPLAY xauthority=$XAUTHORITY"
+} >> "$LOG"
+
+if pgrep -f -- "[p]ython3 -m tools.chip_capture_gui --board-ui --backend local" >/dev/null 2>&1; then
+  echo "already running" >> "$LOG"
+  exit 0
+fi
+
+cd "$APP_DIR"
+exec "$PYTHON" -m tools.chip_capture_gui \
+  --board-ui \
+  --backend local \
+  --profile chip-two-stage-obb-seg-imx678 \
+  --screen-width 800 \
+  --screen-height 600 \
+  --window-x 0 \
+  --window-y 0 \
+  --fullscreen \
+  --voice-command "$VOICE_COMMAND" \
+  --voice-command-timeout 360 \
+  --voice-threads 2 >> "$LOG" 2>&1

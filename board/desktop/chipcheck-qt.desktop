@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ChipCheck Qt
+Name[zh_CN]=ChipCheck Qt
+Comment=Start board-local ChipCheck Qt GUI
+Comment[zh_CN]=在泰山派 HDMI 屏上启动本地 Qt 芯片检测
+Exec=/usr/local/bin/chipcheck-qt-gui
+Icon=camera-photo
+Terminal=false
+StartupNotify=false
+Categories=Utility;

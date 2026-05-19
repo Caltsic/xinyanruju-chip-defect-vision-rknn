@@ -1,5 +1,24 @@
 # Astra Pro Plus 开发发现
 
+## MiniMind-O CPU-only 语音助手发现
+
+- MiniMind-O 上游项目说明 `minimind-3o` 主干约 `0.1B`，2026-05-05 发布权重为 `115M`；但完整 Omni 链路还依赖 SenseVoice-Small、SigLIP2、Mimi、CAMPPlus 等组件。
+- 官方快速开始参考 Python `3.10`；当前板端主 Python 为 `/srv/rk3576-storage/miniforge/bin/python3`，版本 `3.13.12`。完整依赖不应直接安装到现有环境。
+- 板端已存在 ALSA 音频设备和工具：
+  - `/dev/snd/*`
+  - `card0 rockchip-es8388`
+  - `card1 rockchip-hdmi`
+  - `card2 rockchip-dp0`
+  - `/usr/bin/arecord`
+  - `/usr/bin/aplay`
+- 当前工程策略：先部署 CPU-only、按键式、非自启语音助手骨架，完整 MiniMind-O 模型接入作为后续独立阶段。
+- 当前已部署的是非侵入式语音助手骨架，不是完整 MiniMind-O 实模型：
+  - 已完成 GUI 按键/快捷键、录音、占位推理、HDMI 播放和检测并发验证。
+  - 尚未安装 MiniMind-O 的 PyTorch/FunASR/Mimi/SenseVoice 依赖，也未下载模型权重。
+  - 后续接入实模型应通过 `--voice-command` 调用独立 Python 3.10 环境中的脚本，避免污染现有 Python 3.13 检测 GUI 环境。
+- 非干扰验证中，OBB+Seg 检测 `100` 帧并发语音占位链路仍保持约 `6.3-6.7 FPS`，说明音频采集/播放和占位命令本身不抢 NPU、不打断摄像头检测。
+- `/srv/rk3576-storage/yolov8_env` 已在 2026-05-12 改名隔离为 `/srv/rk3576-storage/yolov8_env.disabled_20260512`。当前检测 GUI 和语音助手均走 `miniforge`，隔离后验证正常。旧快捷命令 `/usr/local/bin/ycuda`、`/usr/local/bin/condaactivate` 仍引用原路径，后续若确认不再需要旧 YOLO/ONNX Python 实验环境，可以删除 disabled 目录释放约 `5.3G`。
+
 ## 已确认硬件状态
 
 - ADB 设备：`2e2609c37dc21c0a`

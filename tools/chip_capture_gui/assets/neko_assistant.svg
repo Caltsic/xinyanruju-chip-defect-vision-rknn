@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Neko assistant portrait">
+  <defs>
+    <linearGradient id="mint" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d9ffe7"/>
+      <stop offset="0.55" stop-color="#8ee4b6"/>
+      <stop offset="1" stop-color="#3d9b7a"/>
+    </linearGradient>
+    <linearGradient id="hair" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#cde1ae"/>
+      <stop offset="0.42" stop-color="#86a878"/>
+      <stop offset="1" stop-color="#406d58"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="42%" cy="38%" r="70%">
+      <stop offset="0" stop-color="#e9fff2"/>
+      <stop offset="1" stop-color="#72d8aa"/>
+    </radialGradient>
+  </defs>
+  <circle cx="128" cy="128" r="123" fill="#f8fff9"/>
+  <circle cx="128" cy="137" r="108" fill="url(#glow)"/>
+  <path d="M65 74 38 34l48 14 29 49Z" fill="#78916a" stroke="#1e3f34" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M191 74 218 34l-48 14-29 49Z" fill="#78916a" stroke="#1e3f34" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M59 53 43 39l32 12Z" fill="#ffd8d2"/>
+  <path d="M197 53 213 39l-32 12Z" fill="#ffd8d2"/>
+  <path d="M65 134c0-54 28-91 64-91s64 37 64 91c0 40-26 75-64 75s-64-35-64-75Z" fill="#ffe4d5" stroke="#25483c" stroke-width="4"/>
+  <path d="M61 129c-4-54 19-91 65-99 43 8 68 47 67 96-18-23-29-50-33-78-13 31-46 57-99 81Z" fill="url(#hair)" stroke="#25483c" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M94 115c11-12 25-11 33 0" fill="none" stroke="#33493d" stroke-width="5" stroke-linecap="round"/>
+  <path d="M145 115c11-12 25-11 33 0" fill="none" stroke="#33493d" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="108" cy="132" r="16" fill="#d5ff65" stroke="#16342a" stroke-width="5"/>
+  <circle cx="160" cy="132" r="16" fill="#d5ff65" stroke="#16342a" stroke-width="5"/>
+  <circle cx="113" cy="126" r="5" fill="#fff"/>
+  <circle cx="165" cy="126" r="5" fill="#fff"/>
+  <path d="M125 151c8 5 15 5 23 0" fill="none" stroke="#98443c" stroke-width="5" stroke-linecap="round"/>
+  <path d="M82 161c-18 20-30 47-30 74h152c0-27-12-54-30-74-26 18-66 18-92 0Z" fill="#12181c"/>
+  <path d="M105 184 126 218l25-43" fill="none" stroke="#c6ff62" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="172" y="74" width="35" height="29" rx="8" fill="#11171b" stroke="#baff7a" stroke-width="3"/>
+  <circle cx="184" cy="87" r="4" fill="#baff7a"/>
+  <circle cx="196" cy="87" r="4" fill="#baff7a"/>
+  <path d="M32 98 41 87l8 11-8 11Z" fill="#fff06c"/>
+  <path d="M216 154c18 12 29 29 28 53-13-9-27-10-43-2 15-12 17-30 15-51Z" fill="#4b8d76" stroke="#25483c" stroke-width="4" stroke-linejoin="round"/>
+</svg>

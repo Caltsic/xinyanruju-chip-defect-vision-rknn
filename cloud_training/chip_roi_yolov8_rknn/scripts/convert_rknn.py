@@ -14,6 +14,7 @@ from pathlib import Path
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--onnx", required=True, type=Path, help="Input ONNX model.")
+    parser.add_argument("--split-onnx", type=Path, help="Split ONNX to prefer for conversion.")
     parser.add_argument("--output-dir", required=True, type=Path, help="Directory for RKNN outputs.")
     parser.add_argument("--calib-dataset", required=True, type=Path, help="Calibration image list for INT8.")
     parser.add_argument("--target-platform", default="rk3576", help="RKNN target platform.")
@@ -22,6 +23,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-int8", action="store_true", help="Do not export INT8 RKNN.")
     parser.add_argument("--verbose", action="store_true", help="Enable RKNN verbose logs.")
     return parser.parse_args()
+
+
+def choose_onnx(onnx: Path, split_onnx: Path | None) -> tuple[Path, bool]:
+    candidates = [path for path in [split_onnx, onnx.with_name(f"{onnx.stem}_split.onnx")] if path]
+    for path in candidates:
+        if path.exists():
+            return path, path != onnx
+    if not onnx.exists():
+        raise FileNotFoundError(f"ONNX model does not exist: {onnx}")
+    return onnx, False
 
 
 def validate_calib(path: Path) -> None:
@@ -78,19 +89,22 @@ def convert_one(onnx_path: Path, output_path: Path, target_platform: str, quanti
 
 def main() -> None:
     args = parse_args()
-    if not args.onnx.exists():
-        raise FileNotFoundError(f"ONNX model does not exist: {args.onnx}")
+    onnx_path, using_split = choose_onnx(
+        args.onnx.resolve(),
+        args.split_onnx.resolve() if args.split_onnx else None,
+    )
     validate_calib(args.calib_dataset)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     outputs: dict[str, str] = {}
     if not args.skip_fp:
         fp_path = args.output_dir / f"{args.name}_fp.rknn"
-        convert_one(args.onnx, fp_path, args.target_platform, False, args.calib_dataset, args.verbose)
+        convert_one(onnx_path, fp_path, args.target_platform, False, args.calib_dataset, args.verbose)
         outputs["fp"] = str(fp_path.resolve())
     if not args.skip_int8:
-        int8_path = args.output_dir / f"{args.name}_int8.rknn"
-        convert_one(args.onnx, int8_path, args.target_platform, True, args.calib_dataset, args.verbose)
+        int8_suffix = "_split_int8.rknn" if using_split else "_int8.rknn"
+        int8_path = args.output_dir / f"{args.name}{int8_suffix}"
+        convert_one(onnx_path, int8_path, args.target_platform, True, args.calib_dataset, args.verbose)
         outputs["int8"] = str(int8_path.resolve())
 
     report = {
@@ -98,7 +112,9 @@ def main() -> None:
         "platform": platform.platform(),
         "rknn_toolkit2": rknn_toolkit_version(),
         "target_platform": args.target_platform,
-        "onnx": str(args.onnx.resolve()),
+        "onnx_requested": str(args.onnx.resolve()),
+        "onnx_used": str(onnx_path.resolve()),
+        "using_split_onnx": using_split,
         "calib_dataset": str(args.calib_dataset.resolve()),
         "outputs": outputs,
     }

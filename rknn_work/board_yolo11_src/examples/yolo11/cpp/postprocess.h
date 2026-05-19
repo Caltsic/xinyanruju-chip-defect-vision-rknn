@@ -31,6 +31,23 @@ typedef struct {
 } object_detect_result;
 
 typedef struct {
+    float x;
+    float y;
+} object_obb_point;
+
+typedef struct {
+    image_rect_t box;
+    object_obb_point points[4];
+    float cx;
+    float cy;
+    float width;
+    float height;
+    float angle;
+    float prop;
+    int cls_id;
+} object_obb_result;
+
+typedef struct {
     int x;
     int y;
 } object_seg_point;
@@ -58,6 +75,12 @@ typedef struct {
 typedef struct {
     int id;
     int count;
+    object_obb_result results[OBJ_NUMB_MAX_SIZE];
+} object_obb_result_list;
+
+typedef struct {
+    int id;
+    int count;
     int mask_status;
     object_seg_result results[OBJ_NUMB_MAX_SIZE];
 } object_seg_result_list;
@@ -65,12 +88,14 @@ typedef struct {
 typedef enum {
     YOLO_MODEL_KIND_DETECT = 0,
     YOLO_MODEL_KIND_SEG = 1,
+    YOLO_MODEL_KIND_OBB = 2,
 } yolo_model_kind_t;
 
 int init_post_process();
 void deinit_post_process();
 char *coco_cls_to_name(int cls_id);
 int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter_box, float conf_threshold, float nms_threshold, object_detect_result_list *od_results);
+int post_process_obb(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter_box, float conf_threshold, float nms_threshold, object_obb_result_list *obb_results, object_detect_result_list *bbox_fallback);
 int post_process_seg(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter_box, float conf_threshold, float nms_threshold, object_seg_result_list *seg_results, object_detect_result_list *bbox_fallback);
 
 void deinitPostProcess();

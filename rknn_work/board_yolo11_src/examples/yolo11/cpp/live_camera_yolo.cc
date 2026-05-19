@@ -82,6 +82,7 @@ static_assert(sizeof(float) == 4, "protocol requires 32-bit float");
 const char kDefaultModel[] = DEFAULT_MODEL_PATH;
 const char kDefaultDefectModel[] = DEFAULT_DEFECT_MODEL_PATH;
 const char kDefaultSegDefectModel[] = "model/chipcheck_yolov8_seg_split_int8.rknn";
+const char kDefaultObbChipModel[] = "model/chip_roi_yolov8_obb_split_int8.rknn";
 const char kDefaultDevice[] = DEFAULT_DEVICE_PATH;
 const char kDefaultFormat[] = DEFAULT_CAMERA_FORMAT;
 const uint32_t kDefaultWidth = DEFAULT_CAMERA_WIDTH;
@@ -128,6 +129,7 @@ struct Options {
     uint32_t roi_w;
     uint32_t roi_h;
     bool two_stage;
+    yolo_model_kind_t chip_model_kind;
     yolo_model_kind_t defect_model_kind;
     bool stream_contours;
     bool stream_contours_explicit;
@@ -173,6 +175,7 @@ struct Options {
           roi_w(0),
           roi_h(0),
           two_stage(DEFAULT_TWO_STAGE != 0),
+          chip_model_kind(YOLO_MODEL_KIND_DETECT),
           defect_model_kind(YOLO_MODEL_KIND_DETECT),
           stream_contours(false),
           stream_contours_explicit(false),
@@ -242,6 +245,17 @@ struct TemporalBoxState {
     }
 };
 
+struct TemporalObbState {
+    bool has_box;
+    object_obb_result box;
+    uint32_t missed;
+
+    TemporalObbState() : has_box(false), missed(0)
+    {
+        memset(&box, 0, sizeof(box));
+    }
+};
+
 struct DefectTrack {
     object_detect_result det;
     std::vector<float> class_scores;
@@ -260,6 +274,40 @@ struct DefectTrack {
     {
         memset(&det, 0, sizeof(det));
     }
+};
+
+struct SegDefectTrack {
+    object_detect_result det;
+    object_seg_result seg;
+    std::vector<float> class_scores;
+    uint32_t hits;
+    uint32_t consecutive_hits;
+    uint32_t missed;
+    bool confirmed;
+    bool matched_this_update;
+
+    SegDefectTrack()
+        : hits(0),
+          consecutive_hits(0),
+          missed(0),
+          confirmed(false),
+          matched_this_update(false)
+    {
+        memset(&det, 0, sizeof(det));
+        memset(&seg, 0, sizeof(seg));
+    }
+};
+
+struct AffineTransform {
+    float a00;
+    float a01;
+    float a02;
+    float a10;
+    float a11;
+    float a12;
+
+    AffineTransform()
+        : a00(1.0f), a01(0.0f), a02(0.0f), a10(0.0f), a11(1.0f), a12(0.0f) {}
 };
 
 struct MappedPlane {
@@ -335,7 +383,7 @@ static void print_usage(const char *prog)
     fprintf(stderr,
             "Usage: %s [--model PATH] [--device NODE] [--format yuyv|mjpg] [--width N] [--height N] "
             "[--fps N] [--frames N] [--skip N] [--buffers N] [--roi X,Y,W,H] [--conf F] [--nms F] "
-            "[--two-stage] [--defect-model PATH] [--defect-model-kind detect|seg] [--stream-contours|--no-stream-contours] [--seg-sidecar PATH] "
+            "[--two-stage] [--chip-model-kind detect|obb] [--defect-model PATH] [--defect-model-kind detect|seg] [--stream-contours|--no-stream-contours] [--seg-sidecar PATH] "
             "[--chip-conf F] [--defect-conf F] [--roi-margin F] "
             "[--roi-smooth-alpha F] [--roi-hold N] [--chip-interval N] [--defect-interval N] "
             "[--defect-confirm N] [--defect-hold N] [--defect-smooth-alpha F] "
@@ -469,6 +517,10 @@ static bool parse_model_kind(const std::string &text, yolo_model_kind_t *kind)
         *kind = YOLO_MODEL_KIND_SEG;
         return true;
     }
+    if (text == "obb" || text == "rotated" || text == "oriented") {
+        *kind = YOLO_MODEL_KIND_OBB;
+        return true;
+    }
     return false;
 }
 
@@ -479,6 +531,8 @@ static const char *model_kind_name(yolo_model_kind_t kind)
         return "detect";
     case YOLO_MODEL_KIND_SEG:
         return "seg";
+    case YOLO_MODEL_KIND_OBB:
+        return "obb";
     }
     return "detect";
 }
@@ -576,6 +630,20 @@ static bool parse_float_option(int argc, char **argv, int *index, const char *na
     return true;
 }
 
+static bool parse_alpha_option(int argc, char **argv, int *index, const char *name, float *value)
+{
+    std::string text;
+    if (!take_option_value(argc, argv, index, name, &text)) {
+        return false;
+    }
+    if (!parse_float_value(text.c_str(), value) || !std::isfinite(*value) || *value <= 0.0f || *value > 1.0f) {
+        fprintf(stderr, "invalid value for %s: %s; expected 0.0 < value <= 1.0\n",
+                name, text.c_str());
+        return false;
+    }
+    return true;
+}
+
 static bool parse_float_value_option(int argc, char **argv, int *index, const char *name, float *value)
 {
     std::string text;
@@ -614,6 +682,17 @@ static bool parse_args(int argc, char **argv, Options *opts)
             }
             if (!parse_model_kind(kind, &opts->defect_model_kind)) {
                 fprintf(stderr, "invalid value for --defect-model-kind: %s; expected detect or seg\n",
+                        kind.c_str());
+                return false;
+            }
+        } else if (arg == "--chip-model-kind" || arg.compare(0, 18, "--chip-model-kind=") == 0) {
+            std::string kind;
+            if (!take_option_value(argc, argv, &i, "--chip-model-kind", &kind)) {
+                return false;
+            }
+            if (!parse_model_kind(kind, &opts->chip_model_kind) ||
+                opts->chip_model_kind == YOLO_MODEL_KIND_SEG) {
+                fprintf(stderr, "invalid value for --chip-model-kind: %s; expected detect or obb\n",
                         kind.c_str());
                 return false;
             }
@@ -683,7 +762,7 @@ static bool parse_args(int argc, char **argv, Options *opts)
                 return false;
             }
         } else if (arg == "--roi-smooth-alpha" || arg.compare(0, 19, "--roi-smooth-alpha=") == 0) {
-            if (!parse_float_option(argc, argv, &i, "--roi-smooth-alpha", &opts->roi_smooth_alpha)) {
+            if (!parse_alpha_option(argc, argv, &i, "--roi-smooth-alpha", &opts->roi_smooth_alpha)) {
                 return false;
             }
         } else if (arg == "--roi-hold" || arg.compare(0, 11, "--roi-hold=") == 0) {
@@ -707,7 +786,7 @@ static bool parse_args(int argc, char **argv, Options *opts)
                 return false;
             }
         } else if (arg == "--defect-smooth-alpha" || arg.compare(0, 22, "--defect-smooth-alpha=") == 0) {
-            if (!parse_float_option(argc, argv, &i, "--defect-smooth-alpha", &opts->defect_smooth_alpha)) {
+            if (!parse_alpha_option(argc, argv, &i, "--defect-smooth-alpha", &opts->defect_smooth_alpha)) {
                 return false;
             }
         } else if (arg == "--defect-match-iou" || arg.compare(0, 19, "--defect-match-iou=") == 0) {
@@ -719,7 +798,7 @@ static bool parse_args(int argc, char **argv, Options *opts)
                 return false;
             }
         } else if (arg == "--defect-class-decay" || arg.compare(0, 21, "--defect-class-decay=") == 0) {
-            if (!parse_float_option(argc, argv, &i, "--defect-class-decay", &opts->defect_class_decay)) {
+            if (!parse_alpha_option(argc, argv, &i, "--defect-class-decay", &opts->defect_class_decay)) {
                 return false;
             }
         } else if (arg == "--input-adjust") {
@@ -772,11 +851,15 @@ static bool parse_args(int argc, char **argv, Options *opts)
     if (opts->defect_model_kind == YOLO_MODEL_KIND_SEG && !opts->defect_model_explicit) {
         opts->defect_model = kDefaultSegDefectModel;
     }
+    if (opts->two_stage && opts->chip_model_kind == YOLO_MODEL_KIND_OBB && opts->model == kDefaultModel) {
+        opts->model = kDefaultObbChipModel;
+    }
     if (opts->two_stage && opts->defect_model.empty()) {
         fprintf(stderr, "--defect-model must not be empty in --two-stage mode\n");
         return false;
     }
-    if (opts->defect_model_kind == YOLO_MODEL_KIND_SEG && !opts->stream_contours_explicit) {
+    if ((opts->defect_model_kind == YOLO_MODEL_KIND_SEG || opts->chip_model_kind == YOLO_MODEL_KIND_OBB) &&
+        !opts->stream_contours_explicit) {
         opts->stream_contours = true;
     }
     if (opts->device.empty()) {
@@ -1777,6 +1860,21 @@ static bool append_seg_contour_points(std::vector<uint8_t> *block,
     return point_count >= 3;
 }
 
+static bool append_obb_contour_points(std::vector<uint8_t> *block,
+                                      const object_obb_result *obb)
+{
+    if (obb == NULL) {
+        append_u32_le(block, 0);
+        return false;
+    }
+    append_u32_le(block, 4);
+    for (int i = 0; i < 4; ++i) {
+        append_f32_le(block, obb->points[i].x);
+        append_f32_le(block, obb->points[i].y);
+    }
+    return true;
+}
+
 static bool write_frame_packet_with_seg_contours(int stream_fd, uint32_t width, uint32_t height, uint32_t frame_index,
                                                  const object_detect_result_list &results,
                                                  const object_seg_result_list &seg_results,
@@ -1797,6 +1895,67 @@ static bool write_frame_packet_with_seg_contours(int stream_fd, uint32_t width, 
         const object_seg_result *seg = NULL;
         if (i > 0 && static_cast<int>(i - 1) < seg_results.count) {
             seg = &seg_results.results[i - 1];
+        }
+        has_contours = append_seg_contour_points(&contour_block, seg) || has_contours;
+    }
+
+    if (!has_contours) {
+        return write_frame_packet(stream_fd, width, height, frame_index, results, frame);
+    }
+
+    std::vector<uint8_t> meta;
+    meta.reserve(4 + 5 * sizeof(uint32_t) + det_count * (sizeof(uint32_t) + 5 * sizeof(float)) +
+                 sizeof(uint32_t) + contour_block.size());
+    meta.insert(meta.end(), kProtocolMagic, kProtocolMagic + 4);
+    append_u32_le(&meta, width);
+    append_u32_le(&meta, height);
+    append_u32_le(&meta, frame_index);
+    append_u32_le(&meta, det_count | kDetectionContoursFlag);
+    append_u32_le(&meta, static_cast<uint32_t>(frame.size()));
+
+    for (uint32_t i = 0; i < det_count; ++i) {
+        const object_detect_result &det = results.results[i];
+        const uint32_t class_id = det.cls_id < 0 ? 0U : static_cast<uint32_t>(det.cls_id);
+        append_u32_le(&meta, class_id);
+        append_f32_le(&meta, det.prop);
+        append_f32_le(&meta, static_cast<float>(det.box.left));
+        append_f32_le(&meta, static_cast<float>(det.box.top));
+        append_f32_le(&meta, static_cast<float>(det.box.right));
+        append_f32_le(&meta, static_cast<float>(det.box.bottom));
+    }
+
+    append_u32_le(&meta, static_cast<uint32_t>(contour_block.size()));
+    meta.insert(meta.end(), contour_block.begin(), contour_block.end());
+
+    return write_all(stream_fd, meta.data(), meta.size()) &&
+           write_all(stream_fd, frame.data(), frame.size());
+}
+
+static bool write_frame_packet_with_mixed_contours(int stream_fd, uint32_t width, uint32_t height, uint32_t frame_index,
+                                                   const object_detect_result_list &results,
+                                                   const object_seg_result_list *seg_results,
+                                                   const object_obb_result *chip_obb,
+                                                   const std::vector<uint8_t> &frame)
+{
+    uint32_t det_count = 0;
+    if (results.count > 0) {
+        det_count = static_cast<uint32_t>(results.count);
+        if (det_count > OBJ_NUMB_MAX_SIZE) {
+            det_count = OBJ_NUMB_MAX_SIZE;
+        }
+    }
+
+    std::vector<uint8_t> contour_block;
+    contour_block.reserve(det_count * (sizeof(uint32_t) + 16 * 2 * sizeof(float)));
+    bool has_contours = false;
+    for (uint32_t i = 0; i < det_count; ++i) {
+        if (i == 0 && chip_obb != NULL && results.results[i].cls_id == 0) {
+            has_contours = append_obb_contour_points(&contour_block, chip_obb) || has_contours;
+            continue;
+        }
+        const object_seg_result *seg = NULL;
+        if (seg_results != NULL && i > 0 && static_cast<int>(i - 1) < seg_results->count) {
+            seg = &seg_results->results[i - 1];
         }
         has_contours = append_seg_contour_points(&contour_block, seg) || has_contours;
     }
@@ -1960,6 +2119,91 @@ static bool crop_rgb_rect(const image_buffer_t &src, const image_rect_t &box, fl
     return true;
 }
 
+static float point_distance(const object_obb_point &a, const object_obb_point &b)
+{
+    const float dx = a.x - b.x;
+    const float dy = a.y - b.y;
+    return sqrtf(dx * dx + dy * dy);
+}
+
+static uint8_t sample_rgb_bilinear(const image_buffer_t &src, float x, float y, int channel)
+{
+    const int max_x = src.width - 1;
+    const int max_y = src.height - 1;
+    x = std::max(0.0f, std::min(x, (float)max_x));
+    y = std::max(0.0f, std::min(y, (float)max_y));
+    const int x0 = (int)floorf(x);
+    const int y0 = (int)floorf(y);
+    const int x1 = std::min(x0 + 1, max_x);
+    const int y1 = std::min(y0 + 1, max_y);
+    const float dx = x - (float)x0;
+    const float dy = y - (float)y0;
+    const uint8_t *base = src.virt_addr;
+    const float p00 = base[((size_t)y0 * src.width_stride + x0) * 3 + channel];
+    const float p10 = base[((size_t)y0 * src.width_stride + x1) * 3 + channel];
+    const float p01 = base[((size_t)y1 * src.width_stride + x0) * 3 + channel];
+    const float p11 = base[((size_t)y1 * src.width_stride + x1) * 3 + channel];
+    const float top = p00 * (1.0f - dx) + p10 * dx;
+    const float bottom = p01 * (1.0f - dx) + p11 * dx;
+    return (uint8_t)std::max(0.0f, std::min(255.0f, top * (1.0f - dy) + bottom * dy + 0.5f));
+}
+
+static bool crop_rgb_obb(const image_buffer_t &src, const object_obb_result &obb, float margin,
+                         std::vector<uint8_t> *roi_rgb, image_buffer_t *dst,
+                         AffineTransform *crop_to_src)
+{
+    if (src.format != IMAGE_FORMAT_RGB888 || src.virt_addr == NULL || src.width <= 0 ||
+        src.height <= 0 || src.width_stride <= 0) {
+        fprintf(stderr, "two-stage OBB crop requires a valid RGB888 source image\n");
+        return false;
+    }
+
+    const float base_w = std::max(2.0f, point_distance(obb.points[0], obb.points[1]));
+    const float base_h = std::max(2.0f, point_distance(obb.points[1], obb.points[2]));
+    const float margin_scale = 1.0f + 2.0f * std::max(0.0f, margin);
+    const int roi_w = std::max(2, (int)ceilf(base_w * margin_scale));
+    const int roi_h = std::max(2, (int)ceilf(base_h * margin_scale));
+    const float angle = obb.angle;
+    const float cos_a = cosf(angle);
+    const float sin_a = sinf(angle);
+    const float cx = obb.cx;
+    const float cy = obb.cy;
+    const float half_w = (float)roi_w * 0.5f;
+    const float half_h = (float)roi_h * 0.5f;
+
+    roi_rgb->assign((size_t)roi_w * roi_h * 3, 114);
+    for (int y = 0; y < roi_h; ++y) {
+        for (int x = 0; x < roi_w; ++x) {
+            const float local_x = ((float)x + 0.5f) - half_w;
+            const float local_y = ((float)y + 0.5f) - half_h;
+            const float src_x = cx + local_x * cos_a - local_y * sin_a;
+            const float src_y = cy + local_x * sin_a + local_y * cos_a;
+            const size_t dst_offset = ((size_t)y * roi_w + x) * 3;
+            for (int c = 0; c < 3; ++c) {
+                (*roi_rgb)[dst_offset + c] = sample_rgb_bilinear(src, src_x, src_y, c);
+            }
+        }
+    }
+
+    memset(dst, 0, sizeof(*dst));
+    dst->width = roi_w;
+    dst->height = roi_h;
+    dst->width_stride = roi_w;
+    dst->height_stride = roi_h;
+    dst->format = IMAGE_FORMAT_RGB888;
+    dst->virt_addr = roi_rgb->data();
+    dst->size = static_cast<int>(roi_rgb->size());
+    dst->fd = 0;
+
+    crop_to_src->a00 = cos_a;
+    crop_to_src->a01 = -sin_a;
+    crop_to_src->a02 = cx - half_w * cos_a + half_h * sin_a;
+    crop_to_src->a10 = sin_a;
+    crop_to_src->a11 = cos_a;
+    crop_to_src->a12 = cy - half_w * sin_a - half_h * cos_a;
+    return true;
+}
+
 static int clamp_i32(int value, int low, int high)
 {
     return std::max(low, std::min(value, high));
@@ -2017,6 +2261,97 @@ static void translate_seg_results_from_roi(object_seg_result_list *results,
     }
 }
 
+static object_obb_point map_affine_point(const AffineTransform &transform, float x, float y)
+{
+    object_obb_point point;
+    point.x = transform.a00 * x + transform.a01 * y + transform.a02;
+    point.y = transform.a10 * x + transform.a11 * y + transform.a12;
+    return point;
+}
+
+static image_rect_t aabb_from_points_clamped(const object_obb_point *points, int count,
+                                             uint32_t image_width, uint32_t image_height)
+{
+    float min_x = points[0].x;
+    float max_x = points[0].x;
+    float min_y = points[0].y;
+    float max_y = points[0].y;
+    for (int i = 1; i < count; ++i) {
+        min_x = std::min(min_x, points[i].x);
+        max_x = std::max(max_x, points[i].x);
+        min_y = std::min(min_y, points[i].y);
+        max_y = std::max(max_y, points[i].y);
+    }
+    const int max_x_i = static_cast<int>(image_width) - 1;
+    const int max_y_i = static_cast<int>(image_height) - 1;
+    image_rect_t box;
+    box.left = clamp_i32((int)floorf(min_x), 0, max_x_i);
+    box.top = clamp_i32((int)floorf(min_y), 0, max_y_i);
+    box.right = clamp_i32((int)ceilf(max_x), 0, max_x_i);
+    box.bottom = clamp_i32((int)ceilf(max_y), 0, max_y_i);
+    if (box.right <= box.left) {
+        box.right = clamp_i32(box.left + 1, 0, max_x_i);
+    }
+    if (box.bottom <= box.top) {
+        box.bottom = clamp_i32(box.top + 1, 0, max_y_i);
+    }
+    return box;
+}
+
+static void map_results_from_crop(object_detect_result_list *results,
+                                  const AffineTransform &transform,
+                                  uint32_t image_width, uint32_t image_height)
+{
+    if (results == NULL) {
+        return;
+    }
+    for (int i = 0; i < results->count && i < OBJ_NUMB_MAX_SIZE; ++i) {
+        image_rect_t *box = &results->results[i].box;
+        object_obb_point points[4];
+        points[0] = map_affine_point(transform, (float)box->left, (float)box->top);
+        points[1] = map_affine_point(transform, (float)box->right, (float)box->top);
+        points[2] = map_affine_point(transform, (float)box->right, (float)box->bottom);
+        points[3] = map_affine_point(transform, (float)box->left, (float)box->bottom);
+        *box = aabb_from_points_clamped(points, 4, image_width, image_height);
+    }
+}
+
+static void map_seg_results_from_crop(object_seg_result_list *results,
+                                      const AffineTransform &transform,
+                                      uint32_t image_width, uint32_t image_height)
+{
+    if (results == NULL) {
+        return;
+    }
+    object_detect_result_list bbox_results;
+    memset(&bbox_results, 0, sizeof(bbox_results));
+    bbox_results.count = std::min(results->count, OBJ_NUMB_MAX_SIZE);
+    for (int i = 0; i < bbox_results.count; ++i) {
+        bbox_results.results[i] = results->results[i].det;
+    }
+    map_results_from_crop(&bbox_results, transform, image_width, image_height);
+    for (int i = 0; i < bbox_results.count; ++i) {
+        results->results[i].det = bbox_results.results[i];
+    }
+
+    const int max_x = static_cast<int>(image_width) - 1;
+    const int max_y = static_cast<int>(image_height) - 1;
+    for (int i = 0; i < results->count && i < OBJ_NUMB_MAX_SIZE; ++i) {
+        object_seg_result *seg = &results->results[i];
+        for (int c = 0; c < seg->contour_count && c < 4; ++c) {
+            object_seg_contour *contour = &seg->contours[c];
+            for (int p = 0; p < contour->count && p < 64; ++p) {
+                const object_obb_point mapped = map_affine_point(
+                    transform,
+                    (float)contour->points[p].x,
+                    (float)contour->points[p].y);
+                contour->points[p].x = clamp_i32((int)lroundf(mapped.x), 0, max_x);
+                contour->points[p].y = clamp_i32((int)lroundf(mapped.y), 0, max_y);
+            }
+        }
+    }
+}
+
 static bool select_primary_chip(const object_detect_result_list &chip_results,
                                 object_detect_result *selected)
 {
@@ -2040,6 +2375,136 @@ static bool select_primary_chip(const object_detect_result_list &chip_results,
         return false;
     }
     *selected = chip_results.results[best_index];
+    return true;
+}
+
+static object_detect_result obb_to_detection(const object_obb_result &obb)
+{
+    object_detect_result det;
+    memset(&det, 0, sizeof(det));
+    det.box = obb.box;
+    det.prop = obb.prop;
+    det.cls_id = obb.cls_id;
+    return det;
+}
+
+static bool select_primary_chip_obb(const object_obb_result_list &chip_results,
+                                    object_obb_result *selected)
+{
+    float best_score = -1.0f;
+    int best_index = -1;
+    for (int i = 0; i < chip_results.count && i < OBJ_NUMB_MAX_SIZE; ++i) {
+        const object_obb_result &det = chip_results.results[i];
+        const float area = std::max(1.0f, det.width) * std::max(1.0f, det.height);
+        const float score = area * std::max(0.01f, det.prop);
+        if (score > best_score) {
+            best_score = score;
+            best_index = i;
+        }
+    }
+    if (best_index < 0) {
+        return false;
+    }
+    *selected = chip_results.results[best_index];
+    return true;
+}
+
+static float smooth_float_value(float previous, float current, float alpha)
+{
+    return previous * (1.0f - alpha) + current * alpha;
+}
+
+static float smooth_angle_value(float previous, float current, float alpha)
+{
+    const float pi = 3.14159265358979323846f;
+    float delta = current - previous;
+    while (delta > pi) {
+        delta -= 2.0f * pi;
+    }
+    while (delta < -pi) {
+        delta += 2.0f * pi;
+    }
+    return previous + delta * alpha;
+}
+
+static void refresh_obb_geometry(object_obb_result *obb, uint32_t image_width, uint32_t image_height)
+{
+    const float half_w = std::max(1.0f, obb->width) * 0.5f;
+    const float half_h = std::max(1.0f, obb->height) * 0.5f;
+    const float cos_a = cosf(obb->angle);
+    const float sin_a = sinf(obb->angle);
+    const float corners[4][2] = {
+        {-half_w, -half_h},
+        {half_w, -half_h},
+        {half_w, half_h},
+        {-half_w, half_h},
+    };
+    for (int i = 0; i < 4; ++i) {
+        const float x = corners[i][0];
+        const float y = corners[i][1];
+        obb->points[i].x = obb->cx + x * cos_a - y * sin_a;
+        obb->points[i].y = obb->cy + x * sin_a + y * cos_a;
+    }
+    obb->box = aabb_from_points_clamped(obb->points, 4, image_width, image_height);
+}
+
+static void sanitize_obb(object_obb_result *obb, uint32_t image_width, uint32_t image_height)
+{
+    obb->width = std::max(2.0f, obb->width);
+    obb->height = std::max(2.0f, obb->height);
+    obb->cx = std::max(0.0f, std::min(obb->cx, (float)image_width - 1.0f));
+    obb->cy = std::max(0.0f, std::min(obb->cy, (float)image_height - 1.0f));
+    refresh_obb_geometry(obb, image_width, image_height);
+}
+
+static object_obb_result smooth_chip_obb_detection(TemporalObbState *state,
+                                                   const object_obb_result &current,
+                                                   float alpha,
+                                                   uint32_t image_width,
+                                                   uint32_t image_height)
+{
+    const float clamped_alpha = std::max(0.01f, std::min(alpha, 1.0f));
+    if (!state->has_box) {
+        state->box = current;
+        state->has_box = true;
+        state->missed = 0;
+        sanitize_obb(&state->box, image_width, image_height);
+        return state->box;
+    }
+
+    object_obb_result smoothed = current;
+    smoothed.cx = smooth_float_value(state->box.cx, current.cx, clamped_alpha);
+    smoothed.cy = smooth_float_value(state->box.cy, current.cy, clamped_alpha);
+    smoothed.width = smooth_float_value(state->box.width, current.width, clamped_alpha);
+    smoothed.height = smooth_float_value(state->box.height, current.height, clamped_alpha);
+    smoothed.angle = smooth_angle_value(state->box.angle, current.angle, clamped_alpha);
+    smoothed.prop = smooth_float_value(state->box.prop, current.prop, clamped_alpha);
+    sanitize_obb(&smoothed, image_width, image_height);
+    state->box = smoothed;
+    state->missed = 0;
+    return state->box;
+}
+
+static bool hold_chip_obb_detection(TemporalObbState *state,
+                                    uint32_t max_hold,
+                                    object_obb_result *held)
+{
+    if (!state->has_box || state->missed >= max_hold) {
+        return false;
+    }
+    ++state->missed;
+    *held = state->box;
+    held->prop *= 0.90f;
+    return true;
+}
+
+static bool reuse_chip_obb_detection(const TemporalObbState &state,
+                                     object_obb_result *held)
+{
+    if (!state.has_box) {
+        return false;
+    }
+    *held = state.box;
     return true;
 }
 
@@ -2385,6 +2850,223 @@ private:
     }
 };
 
+class SegDefectTemporalFilter {
+public:
+    SegDefectTemporalFilter() : class_count_(0) {}
+
+    void configure(int class_count)
+    {
+        class_count_ = std::max(1, class_count);
+        tracks_.clear();
+    }
+
+    void update(const object_seg_result_list &seg_input,
+                const object_detect_result_list &bbox_input,
+                const Options &opts,
+                uint32_t image_width,
+                uint32_t image_height,
+                object_detect_result_list *det_output,
+                object_seg_result_list *seg_output)
+    {
+        ensure_configured();
+        for (size_t i = 0; i < tracks_.size(); ++i) {
+            tracks_[i].matched_this_update = false;
+        }
+
+        std::vector<object_seg_result> candidates;
+        candidates.reserve(std::max(0, seg_input.count));
+        for (int i = 0; i < seg_input.count && i < OBJ_NUMB_MAX_SIZE; ++i) {
+            object_seg_result seg = seg_input.results[i];
+            if (i < bbox_input.count && i < OBJ_NUMB_MAX_SIZE) {
+                seg.det = bbox_input.results[i];
+            }
+            if (seg.det.box.right <= seg.det.box.left || seg.det.box.bottom <= seg.det.box.top) {
+                continue;
+            }
+            sanitize_box(&seg.det.box, image_width, image_height);
+            candidates.push_back(seg);
+        }
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const object_seg_result &a, const object_seg_result &b) {
+                      return a.det.prop > b.det.prop;
+                  });
+
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            const object_seg_result &candidate = candidates[i];
+            int best_index = -1;
+            bool best_already_matched = false;
+            float best_score = -1.0f;
+            for (size_t t = 0; t < tracks_.size(); ++t) {
+                float match_score = 0.0f;
+                if (!match_score_for(tracks_[t], candidate.det, opts, &match_score)) {
+                    continue;
+                }
+                if (match_score > best_score) {
+                    best_score = match_score;
+                    best_index = static_cast<int>(t);
+                    best_already_matched = tracks_[t].matched_this_update;
+                }
+            }
+
+            if (best_index >= 0) {
+                if (best_already_matched) {
+                    vote_class(&tracks_[best_index], candidate.det, opts);
+                } else {
+                    update_track(&tracks_[best_index], candidate, opts, image_width, image_height);
+                }
+                continue;
+            }
+
+            create_track(candidate, opts, image_width, image_height);
+        }
+
+        std::vector<SegDefectTrack> next_tracks;
+        next_tracks.reserve(tracks_.size());
+        for (size_t i = 0; i < tracks_.size(); ++i) {
+            SegDefectTrack track = tracks_[i];
+            if (!track.matched_this_update) {
+                track.missed += 1;
+                track.consecutive_hits = 0;
+                track.det.prop *= 0.90f;
+            }
+            if (track.missed <= opts.defect_hold) {
+                next_tracks.push_back(track);
+            }
+        }
+        tracks_.swap(next_tracks);
+
+        fill_output(seg_input.mask_status, det_output, seg_output);
+    }
+
+private:
+    int class_count_;
+    std::vector<SegDefectTrack> tracks_;
+
+    void ensure_configured()
+    {
+        if (class_count_ <= 0) {
+            class_count_ = 4;
+        }
+    }
+
+    bool match_score_for(const SegDefectTrack &track,
+                         const object_detect_result &candidate,
+                         const Options &opts,
+                         float *score) const
+    {
+        const float iou = rect_iou(track.det.box, candidate.box);
+        const float center_ratio = rect_center_distance_ratio(track.det.box, candidate.box);
+        if (iou < opts.defect_match_iou && center_ratio > opts.defect_match_center) {
+            return false;
+        }
+        const float center_bonus = opts.defect_match_center > 0.0f
+                                       ? std::max(0.0f, 1.0f - center_ratio / opts.defect_match_center)
+                                       : 0.0f;
+        const float class_bonus = track.det.cls_id == candidate.cls_id ? 0.05f : 0.0f;
+        *score = iou + 0.25f * center_bonus + class_bonus;
+        return true;
+    }
+
+    void decay_votes(SegDefectTrack *track, const Options &opts)
+    {
+        const float decay = std::max(0.01f, std::min(opts.defect_class_decay, 0.99f));
+        for (size_t i = 0; i < track->class_scores.size(); ++i) {
+            track->class_scores[i] *= decay;
+        }
+    }
+
+    void vote_class(SegDefectTrack *track, const object_detect_result &candidate, const Options &opts)
+    {
+        decay_votes(track, opts);
+        if (candidate.cls_id >= 0 && candidate.cls_id < static_cast<int>(track->class_scores.size())) {
+            track->class_scores[static_cast<size_t>(candidate.cls_id)] += std::max(0.001f, candidate.prop);
+        }
+        track->det.cls_id = stable_dominant_class(track->class_scores, track->det.cls_id,
+                                                  candidate.cls_id);
+    }
+
+    void update_track(SegDefectTrack *track,
+                      const object_seg_result &candidate,
+                      const Options &opts,
+                      uint32_t image_width,
+                      uint32_t image_height)
+    {
+        const float alpha = std::max(0.01f, std::min(opts.defect_smooth_alpha, 1.0f));
+        track->det.box.left = smooth_coord(track->det.box.left, candidate.det.box.left, alpha);
+        track->det.box.top = smooth_coord(track->det.box.top, candidate.det.box.top, alpha);
+        track->det.box.right = smooth_coord(track->det.box.right, candidate.det.box.right, alpha);
+        track->det.box.bottom = smooth_coord(track->det.box.bottom, candidate.det.box.bottom, alpha);
+        sanitize_box(&track->det.box, image_width, image_height);
+        track->det.prop = track->det.prop * (1.0f - alpha) + candidate.det.prop * alpha;
+        track->hits += 1;
+        track->consecutive_hits += 1;
+        if (track->consecutive_hits >= opts.defect_confirm) {
+            track->confirmed = true;
+        }
+        track->missed = 0;
+        track->matched_this_update = true;
+        track->seg = candidate;
+        vote_class(track, candidate.det, opts);
+    }
+
+    void create_track(const object_seg_result &candidate,
+                      const Options &opts,
+                      uint32_t image_width,
+                      uint32_t image_height)
+    {
+        SegDefectTrack track;
+        track.det = candidate.det;
+        sanitize_box(&track.det.box, image_width, image_height);
+        track.seg = candidate;
+        track.class_scores.assign(static_cast<size_t>(class_count_), 0.0f);
+        if (candidate.det.cls_id >= 0 && candidate.det.cls_id < class_count_) {
+            track.class_scores[static_cast<size_t>(candidate.det.cls_id)] =
+                std::max(0.001f, candidate.det.prop);
+        }
+        track.det.cls_id = dominant_class(track.class_scores, candidate.det.cls_id);
+        track.hits = 1;
+        track.consecutive_hits = 1;
+        track.confirmed = track.consecutive_hits >= opts.defect_confirm;
+        track.missed = 0;
+        track.matched_this_update = true;
+        tracks_.push_back(track);
+    }
+
+    void fill_output(int mask_status,
+                     object_detect_result_list *det_output,
+                     object_seg_result_list *seg_output) const
+    {
+        memset(det_output, 0, sizeof(*det_output));
+        memset(seg_output, 0, sizeof(*seg_output));
+        seg_output->mask_status = mask_status;
+
+        std::vector<SegDefectTrack> visible;
+        visible.reserve(tracks_.size());
+        for (size_t i = 0; i < tracks_.size(); ++i) {
+            const SegDefectTrack &track = tracks_[i];
+            if (!track.confirmed) {
+                continue;
+            }
+            if (track.det.prop <= 0.001f) {
+                continue;
+            }
+            visible.push_back(track);
+        }
+        std::sort(visible.begin(), visible.end(),
+                  [](const SegDefectTrack &a, const SegDefectTrack &b) {
+                      return a.det.prop > b.det.prop;
+                  });
+
+        for (size_t i = 0; i < visible.size() && det_output->count < OBJ_NUMB_MAX_SIZE; ++i) {
+            const SegDefectTrack &track = visible[i];
+            object_seg_result seg = track.seg;
+            seg.det = track.det;
+            det_output->results[det_output->count++] = track.det;
+            seg_output->results[seg_output->count++] = seg;
+        }
+    }
+};
+
 static void append_detection(object_detect_result_list *dst,
                              const object_detect_result &src,
                              int class_offset,
@@ -2429,6 +3111,7 @@ int main(int argc, char **argv)
     rknn_app_context_t rknn_app_ctx;
     rknn_app_context_t defect_app_ctx;
     DefectTemporalFilter defect_filter;
+    SegDefectTemporalFilter seg_defect_filter;
     InputAdjustRuntime input_adjust;
     memset(&rknn_app_ctx, 0, sizeof(rknn_app_ctx));
     memset(&defect_app_ctx, 0, sizeof(defect_app_ctx));
@@ -2444,6 +3127,7 @@ int main(int argc, char **argv)
     uint32_t consecutive_mjpeg_errors = 0;
     const uint32_t max_consecutive_mjpeg_errors = 60;
     TemporalBoxState chip_box_state;
+    TemporalObbState chip_obb_state;
     object_detect_result_list cached_defect_results;
     memset(&cached_defect_results, 0, sizeof(cached_defect_results));
     bool has_cached_defect_results = false;
@@ -2475,6 +3159,7 @@ int main(int argc, char **argv)
         defect_app_ctx.box_conf_threshold = opts.defect_conf_threshold;
         defect_app_ctx.nms_threshold = opts.nms_threshold;
         defect_filter.configure(defect_app_ctx.class_count);
+        seg_defect_filter.configure(defect_app_ctx.class_count);
         if (opts.defect_model_kind == YOLO_MODEL_KIND_SEG) {
             fprintf(stderr,
                     "defect model kind=seg: YOLOv8-seg mask contour postprocess is enabled\n");
@@ -2510,7 +3195,8 @@ int main(int argc, char **argv)
     }
     if (opts.two_stage) {
         fprintf(stderr,
-                " two_stage=on defect_model_kind=%s chip_conf=%.3f defect_conf=%.3f roi_margin=%.3f roi_smooth_alpha=%.3f roi_hold=%u chip_interval=%u defect_interval=%u defect_confirm=%u defect_hold=%u defect_smooth_alpha=%.3f defect_match_iou=%.3f defect_match_center=%.3f defect_class_decay=%.3f",
+                " two_stage=on chip_model_kind=%s defect_model_kind=%s chip_conf=%.3f defect_conf=%.3f roi_margin=%.3f roi_smooth_alpha=%.3f roi_hold=%u chip_interval=%u defect_interval=%u defect_confirm=%u defect_hold=%u defect_smooth_alpha=%.3f defect_match_iou=%.3f defect_match_center=%.3f defect_class_decay=%.3f",
+                model_kind_name(opts.chip_model_kind),
                 model_kind_name(opts.defect_model_kind),
                 opts.chip_conf_threshold, opts.defect_conf_threshold, opts.roi_margin,
                 opts.roi_smooth_alpha, opts.roi_hold, opts.chip_interval, opts.defect_interval,
@@ -2606,35 +3292,81 @@ int main(int argc, char **argv)
 
         object_detect_result_list od_results;
         memset(&od_results, 0, sizeof(od_results));
+        object_obb_result current_chip_obb;
+        memset(&current_chip_obb, 0, sizeof(current_chip_obb));
+        bool have_current_chip_obb = false;
         if (opts.two_stage) {
             object_detect_result chip_box;
             memset(&chip_box, 0, sizeof(chip_box));
             bool have_chip_box = false;
-            const bool should_run_chip = !chip_box_state.has_box ||
-                                         opts.chip_interval <= 1 ||
-                                         (emitted % opts.chip_interval) == 0;
-            if (should_run_chip) {
-                object_detect_result_list chip_results;
-                memset(&chip_results, 0, sizeof(chip_results));
-                const int chip_ret = inference_yolo11_model(&rknn_app_ctx, &image, &chip_results);
-                if (chip_ret != 0) {
-                    fprintf(stderr, "chip inference failed: ret=%d frame=%u\n", chip_ret, emitted);
-                    exit_code = 1;
-                    queue_buffer(&camera, buf.index);
-                    break;
+            if (opts.chip_model_kind == YOLO_MODEL_KIND_OBB) {
+                object_obb_result chip_obb;
+                memset(&chip_obb, 0, sizeof(chip_obb));
+                bool have_chip_obb = false;
+                const bool should_run_chip = !chip_obb_state.has_box ||
+                                             opts.chip_interval <= 1 ||
+                                             (emitted % opts.chip_interval) == 0;
+                if (should_run_chip) {
+                    object_obb_result_list chip_obb_results;
+                    object_detect_result_list chip_bbox_results;
+                    memset(&chip_obb_results, 0, sizeof(chip_obb_results));
+                    memset(&chip_bbox_results, 0, sizeof(chip_bbox_results));
+                    const int chip_ret = inference_yolo11_obb_model(&rknn_app_ctx, &image,
+                                                                    &chip_obb_results,
+                                                                    &chip_bbox_results);
+                    if (chip_ret != 0) {
+                        fprintf(stderr, "chip OBB inference failed: ret=%d frame=%u\n", chip_ret, emitted);
+                        exit_code = 1;
+                        queue_buffer(&camera, buf.index);
+                        break;
+                    }
+
+                    object_obb_result detected_chip_obb;
+                    memset(&detected_chip_obb, 0, sizeof(detected_chip_obb));
+                    if (select_primary_chip_obb(chip_obb_results, &detected_chip_obb)) {
+                        chip_obb = smooth_chip_obb_detection(&chip_obb_state, detected_chip_obb,
+                                                             opts.roi_smooth_alpha, opts.width, opts.height);
+                        have_chip_obb = true;
+                    } else if (hold_chip_obb_detection(&chip_obb_state, opts.roi_hold, &chip_obb)) {
+                        have_chip_obb = true;
+                    }
+                } else if (reuse_chip_obb_detection(chip_obb_state, &chip_obb)) {
+                    have_chip_obb = true;
                 }
 
-                object_detect_result detected_chip_box;
-                memset(&detected_chip_box, 0, sizeof(detected_chip_box));
-                if (select_primary_chip(chip_results, &detected_chip_box)) {
-                    chip_box = smooth_chip_detection(&chip_box_state, detected_chip_box,
-                                                     opts.roi_smooth_alpha, opts.width, opts.height);
-                    have_chip_box = true;
-                } else if (hold_chip_detection(&chip_box_state, opts.roi_hold, &chip_box)) {
+                if (have_chip_obb) {
+                    current_chip_obb = chip_obb;
+                    have_current_chip_obb = true;
+                    chip_box = obb_to_detection(chip_obb);
                     have_chip_box = true;
                 }
-            } else if (reuse_chip_detection(chip_box_state, &chip_box)) {
-                have_chip_box = true;
+            } else {
+                const bool should_run_chip = !chip_box_state.has_box ||
+                                             opts.chip_interval <= 1 ||
+                                             (emitted % opts.chip_interval) == 0;
+                if (should_run_chip) {
+                    object_detect_result_list chip_results;
+                    memset(&chip_results, 0, sizeof(chip_results));
+                    const int chip_ret = inference_yolo11_model(&rknn_app_ctx, &image, &chip_results);
+                    if (chip_ret != 0) {
+                        fprintf(stderr, "chip inference failed: ret=%d frame=%u\n", chip_ret, emitted);
+                        exit_code = 1;
+                        queue_buffer(&camera, buf.index);
+                        break;
+                    }
+
+                    object_detect_result detected_chip_box;
+                    memset(&detected_chip_box, 0, sizeof(detected_chip_box));
+                    if (select_primary_chip(chip_results, &detected_chip_box)) {
+                        chip_box = smooth_chip_detection(&chip_box_state, detected_chip_box,
+                                                         opts.roi_smooth_alpha, opts.width, opts.height);
+                        have_chip_box = true;
+                    } else if (hold_chip_detection(&chip_box_state, opts.roi_hold, &chip_box)) {
+                        have_chip_box = true;
+                    }
+                } else if (reuse_chip_detection(chip_box_state, &chip_box)) {
+                    have_chip_box = true;
+                }
             }
 
             if (have_chip_box) {
@@ -2647,9 +3379,20 @@ int main(int argc, char **argv)
                     image_buffer_t defect_image;
                     uint32_t defect_offset_x = 0;
                     uint32_t defect_offset_y = 0;
-                    if (!crop_rgb_rect(image, chip_box.box, opts.roi_margin,
-                                       &roi_rgb_frame, &defect_image,
-                                       &defect_offset_x, &defect_offset_y)) {
+                    AffineTransform crop_to_src;
+                    const bool use_obb_crop = have_current_chip_obb &&
+                                              opts.chip_model_kind == YOLO_MODEL_KIND_OBB;
+                    bool crop_ok = false;
+                    if (use_obb_crop) {
+                        crop_ok = crop_rgb_obb(image, current_chip_obb, opts.roi_margin,
+                                               &roi_rgb_frame, &defect_image,
+                                               &crop_to_src);
+                    } else {
+                        crop_ok = crop_rgb_rect(image, chip_box.box, opts.roi_margin,
+                                                &roi_rgb_frame, &defect_image,
+                                                &defect_offset_x, &defect_offset_y);
+                    }
+                    if (!crop_ok) {
                         exit_code = 1;
                         queue_buffer(&camera, buf.index);
                         break;
@@ -2664,20 +3407,30 @@ int main(int argc, char **argv)
                         defect_ret = inference_yolo11_seg_model(&defect_app_ctx, &defect_image,
                                                                 &defect_seg_results, &defect_results);
                         if (defect_ret == 0) {
-                            translate_results_from_roi(&defect_results, defect_offset_x, defect_offset_y,
-                                                       opts.width, opts.height);
-                            translate_seg_results_from_roi(&defect_seg_results, defect_offset_x, defect_offset_y,
+                            if (use_obb_crop) {
+                                map_results_from_crop(&defect_results, crop_to_src, opts.width, opts.height);
+                                map_seg_results_from_crop(&defect_seg_results, crop_to_src, opts.width, opts.height);
+                            } else {
+                                translate_results_from_roi(&defect_results, defect_offset_x, defect_offset_y,
                                                            opts.width, opts.height);
-                            cached_defect_results = defect_results;
-                            cached_seg_results = defect_seg_results;
+                                translate_seg_results_from_roi(&defect_seg_results, defect_offset_x, defect_offset_y,
+                                                               opts.width, opts.height);
+                            }
+                            seg_defect_filter.update(defect_seg_results, defect_results, opts,
+                                                     opts.width, opts.height,
+                                                     &cached_defect_results, &cached_seg_results);
                             has_cached_defect_results = true;
                             has_cached_seg_results = true;
                         }
                     } else {
                         defect_ret = inference_yolo11_model(&defect_app_ctx, &defect_image, &defect_results);
                         if (defect_ret == 0) {
-                            translate_results_from_roi(&defect_results, defect_offset_x, defect_offset_y,
-                                                       opts.width, opts.height);
+                            if (use_obb_crop) {
+                                map_results_from_crop(&defect_results, crop_to_src, opts.width, opts.height);
+                            } else {
+                                translate_results_from_roi(&defect_results, defect_offset_x, defect_offset_y,
+                                                           opts.width, opts.height);
+                            }
                             defect_filter.update(defect_results, opts, opts.width, opts.height,
                                                  &cached_defect_results);
                             has_cached_defect_results = true;
@@ -2717,9 +3470,12 @@ int main(int argc, char **argv)
             translate_results_from_roi(&od_results, roi_offset_x, roi_offset_y, opts.width, opts.height);
         }
 
-        const bool wrote_frame = opts.stream_contours && has_cached_seg_results
-                                     ? write_frame_packet_with_seg_contours(stream_fd, opts.width, opts.height,
-                                                                            emitted, od_results, cached_seg_results, frame)
+        const object_seg_result_list *seg_contours = has_cached_seg_results ? &cached_seg_results : NULL;
+        const object_obb_result *chip_obb_contour = have_current_chip_obb ? &current_chip_obb : NULL;
+        const bool wrote_frame = opts.stream_contours && (seg_contours != NULL || chip_obb_contour != NULL)
+                                     ? write_frame_packet_with_mixed_contours(stream_fd, opts.width, opts.height,
+                                                                              emitted, od_results, seg_contours,
+                                                                              chip_obb_contour, frame)
                                      : write_frame_packet(stream_fd, opts.width, opts.height, emitted, od_results, frame);
         if (!wrote_frame) {
             fprintf(stderr, "write stream failed: %s\n", strerror(errno));

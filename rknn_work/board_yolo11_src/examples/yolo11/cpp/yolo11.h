@@ -60,6 +60,7 @@ int init_yolo11_model(const char* model_path, rknn_app_context_t* app_ctx);
 int release_yolo11_model(rknn_app_context_t* app_ctx);
 
 int inference_yolo11_model(rknn_app_context_t* app_ctx, image_buffer_t* img, object_detect_result_list* od_results);
+int inference_yolo11_obb_model(rknn_app_context_t* app_ctx, image_buffer_t* img, object_obb_result_list* obb_results, object_detect_result_list* bbox_fallback);
 int inference_yolo11_seg_model(rknn_app_context_t* app_ctx, image_buffer_t* img, object_seg_result_list* seg_results, object_detect_result_list* bbox_fallback);
 
 #endif //_RKNN_DEMO_YOLO11_H_

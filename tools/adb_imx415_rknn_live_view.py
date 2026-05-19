@@ -33,8 +33,10 @@ BOX_STRUCT = struct.Struct("<Ifffff")
 CONTOUR_BLOCK_SIZE_STRUCT = struct.Struct("<I")
 CONTOUR_POINT_COUNT_STRUCT = struct.Struct("<I")
 CONTOUR_POINT_STRUCT = struct.Struct("<ff")
+OBB_STRUCT = struct.Struct("<fffffffff")
 DETECTION_CONTOURS_FLAG = 0x80000000
-DETECTION_COUNT_MASK = 0x7FFFFFFF
+DETECTION_OBB_FLAG = 0x40000000
+DETECTION_COUNT_MASK = 0x3FFFFFFF
 
 YOLO11_REMOTE_WORKDIR = "/userdata/rknn_yolo11_demo"
 YOLO11_REMOTE_BINARY = "./rknn_yolo11_camera_stream"
@@ -49,9 +51,10 @@ CHIP_ROI_MAIXCAM_REMOTE_BINARY = "./rknn_chip_roi_maixcam_stream"
 CHIP_TWO_STAGE_MAIXCAM_REMOTE_BINARY = "./rknn_chip_two_stage_maixcam_stream"
 CHIP_ROI_INT8_REMOTE_MODEL = "model/chip_roi_yolov8_detect_split_int8.rknn"
 CHIP_ROI_FP_REMOTE_MODEL = "model/chip_roi_yolov8_detect_fp.rknn"
+CHIP_ROI_OBB_REMOTE_MODEL = "model/chip_roi_yolov8_obb_split_int8.rknn"
 CHIP_ROI_REMOTE_MODEL = CHIP_ROI_INT8_REMOTE_MODEL
 REMOTE_DEVICE = "/dev/video42"
-DEFAULT_REMOTE_LOG = "/tmp/rknn_yolo11_camera_stream.log"
+DEFAULT_REMOTE_LOG = "/userdata/rknn_yolo11_demo/rknn_yolo11_camera_stream.log"
 
 DEFAULT_SERIAL = "2e2609c37dc21c0a"
 DEFAULT_WIDTH = 960
@@ -63,10 +66,20 @@ DEFAULT_NMS = 0.45
 DEFAULT_PROFILE = "chip-defect"
 
 REMOTE_WS2812_SCRIPT = "/userdata/rknn_yolo11_demo/ws2812_spi.py"
+REMOTE_WS2812_BACKLIGHT_SCRIPT = "/userdata/rknn_yolo11_demo/ws2812_gpio.py"
+REMOTE_WS2812_BACKLIGHT_HELPER = "/userdata/rknn_yolo11_demo/ws2812_gpio_mmio"
 DEFAULT_LIGHT_RGB = "190,255,100"
 DEFAULT_LIGHT_BRIGHTNESS = 0.50
-DEFAULT_LIGHT_COUNT = 8
+DEFAULT_LIGHT_HIGH_BRIGHTNESS = 0.20
+DEFAULT_LIGHT_LOW_BRIGHTNESS = 0.20
+DEFAULT_LIGHT_BACKLIGHT_BRIGHTNESS = 0.20
+DEFAULT_LIGHT_COUNT = 44
+DEFAULT_LIGHT_SEGMENT_COUNTS = "8,12,24"
 DEFAULT_LIGHT_DEVICE = "/dev/spidev1.0"
+DEFAULT_BACKLIGHT_COUNT = 256
+DEFAULT_BACKLIGHT_GPIO = "GPIO3_A2"
+DEFAULT_BACKLIGHT_GPIO_CHIP = "gpiochip3"
+DEFAULT_BACKLIGHT_GPIO_LINE = 2
 
 DEFAULT_PREVIEW_BRIGHTNESS = -6
 DEFAULT_PREVIEW_CONTRAST = 1.28
@@ -74,7 +87,7 @@ DEFAULT_PREVIEW_GAMMA = 0.91
 DEFAULT_PREVIEW_SATURATION = 0.30
 DEFAULT_PREVIEW_SHARPNESS = 0.85
 DEFAULT_PREVIEW_DENOISE = 6
-DEFAULT_INPUT_ADJUST_FILE = "/tmp/chip_input_adjust.conf"
+DEFAULT_INPUT_ADJUST_FILE = "/userdata/rknn_yolo11_demo/chip_input_adjust.conf"
 DEFAULT_INPUT_BRIGHTNESS = DEFAULT_PREVIEW_BRIGHTNESS
 DEFAULT_INPUT_CONTRAST = DEFAULT_PREVIEW_CONTRAST
 DEFAULT_INPUT_GAMMA = DEFAULT_PREVIEW_GAMMA
@@ -82,6 +95,10 @@ DEFAULT_INPUT_SATURATION = DEFAULT_PREVIEW_SATURATION
 DEFAULT_INPUT_SHARPNESS = DEFAULT_PREVIEW_SHARPNESS
 DEFAULT_TWO_STAGE_DEFECT_CONF = 0.45
 DEFAULT_TWO_STAGE_DISPLAY_MAX_DEFECTS = 20
+OBB_BALANCED_CHIP_CONF = 0.45
+OBB_BALANCED_ROI_SMOOTH_ALPHA = 0.55
+OBB_BALANCED_ROI_HOLD = 1
+OBB_BALANCED_CHIP_INTERVAL = 1
 
 MAX_DETECTIONS = 1024
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024
@@ -194,14 +211,21 @@ UVC_CHIP_PROFILES = (
     "chip-two-stage-imx678",
     "chip-two-stage-seg-maixcam",
     "chip-two-stage-seg-imx678",
+    "chip-two-stage-obb-seg-imx678",
 )
 TWO_STAGE_PROFILES = (
     "chip-two-stage-maixcam",
     "chip-two-stage-imx678",
     "chip-two-stage-seg-maixcam",
     "chip-two-stage-seg-imx678",
+    "chip-two-stage-obb-seg-imx678",
 )
-SEG_TWO_STAGE_PROFILES = ("chip-two-stage-seg-maixcam", "chip-two-stage-seg-imx678")
+SEG_TWO_STAGE_PROFILES = (
+    "chip-two-stage-seg-maixcam",
+    "chip-two-stage-seg-imx678",
+    "chip-two-stage-obb-seg-imx678",
+)
+OVERLAY_MODES = ("all", "mask", "contour", "mask-contour", "boxes")
 
 BOX_COLORS = [
     (56, 56, 255),
@@ -241,6 +265,8 @@ class Detection:
     score: float
     polygon: list[tuple[float, float]] | None = None
     contour: list[tuple[float, float]] | None = None
+    obb_points: list[tuple[float, float]] | None = None
+    obb_angle: float | None = None
     area: float | None = None
 
 
@@ -261,11 +287,28 @@ class DetectionTrack:
     x2: float
     y2: float
     score: float
+    polygon: list[tuple[float, float]] | None = None
+    contour: list[tuple[float, float]] | None = None
+    obb_points: list[tuple[float, float]] | None = None
+    obb_angle: float | None = None
+    area: float | None = None
     hits: int = 1
     missed: int = 0
 
     def as_detection(self) -> Detection:
-        return Detection(self.class_id, self.x1, self.y1, self.x2, self.y2, self.score)
+        return Detection(
+            self.class_id,
+            self.x1,
+            self.y1,
+            self.x2,
+            self.y2,
+            self.score,
+            polygon=self.polygon,
+            contour=self.contour,
+            obb_points=self.obb_points,
+            obb_angle=self.obb_angle,
+            area=self.area,
+        )
 
 
 class FpsMeter:
@@ -332,35 +375,129 @@ def run_adb_shell(args: argparse.Namespace, script: str, timeout: float = 5.0) -
     )
 
 
+def remote_abs_path(workdir: str, path: str) -> str:
+    remote_path = PurePosixPath(path)
+    if remote_path.is_absolute():
+        return str(remote_path)
+    return str(PurePosixPath(workdir) / remote_path)
+
+
+def check_remote_runtime_files(args: argparse.Namespace) -> bool:
+    checks: list[tuple[str, str, str]] = [
+        ("binary", args.remote_binary, "-x"),
+        ("model", args.remote_model, "-f"),
+    ]
+    if args.profile in TWO_STAGE_PROFILES:
+        checks.append(("defect-model", args.remote_defect_model, "-f"))
+
+    snippets = []
+    for label, path, test_op in checks:
+        absolute_path = remote_abs_path(args.remote_workdir, path)
+        snippets.append(
+            f"test {test_op} {shlex.quote(absolute_path)} || "
+            f"printf '%s\\t%s\\n' {shlex.quote(label)} {shlex.quote(absolute_path)}"
+        )
+    script = "; ".join(snippets)
+
+    try:
+        result = run_adb_shell(args, script, timeout=5.0)
+    except Exception as exc:  # noqa: BLE001 - top-level diagnostic for a CLI tool
+        print(f"Remote runtime preflight failed: {exc}", file=sys.stderr)
+        return False
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        suffix = f": {detail}" if detail else ""
+        print(f"Remote runtime preflight returned {result.returncode}{suffix}", file=sys.stderr)
+        return False
+
+    missing = [line for line in result.stdout.splitlines() if line.strip()]
+    if not missing:
+        return True
+
+    print("Missing board runtime file(s):", file=sys.stderr)
+    for line in missing:
+        parts = line.split("\t", 1)
+        if len(parts) == 2:
+            print(f"  {parts[0]}: {parts[1]}", file=sys.stderr)
+        else:
+            print(f"  {line}", file=sys.stderr)
+    return False
+
+
+def run_runtime_setup_command(
+    args: argparse.Namespace,
+    label: str,
+    remote_args: list[object],
+    timeout: float = 8.0,
+) -> bool:
+    script = shell_join(remote_args)
+    try:
+        result = run_adb_shell(args, script, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - realtime view should still start
+        print(f"Runtime setup warning: {label} setup failed: {exc}", file=sys.stderr)
+        return False
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        suffix = f": {detail}" if detail else ""
+        print(f"Runtime setup warning: {label} setup returned {result.returncode}{suffix}", file=sys.stderr)
+        return False
+    return True
+
+
 def maybe_setup_ws2812(args: argparse.Namespace) -> None:
     if args.no_runtime_setup or args.profile == "yolo11":
         return
-    remote_args = [
+    ring_args = [
         "python3",
         REMOTE_WS2812_SCRIPT,
         "--device",
         args.light_device,
         "--count",
         args.light_count,
+        "--segment-counts",
+        args.light_segment_counts,
+        "--segment-brightness",
+        f"{args.light_brightness:.3f},{args.light_high_brightness:.3f},{args.light_low_brightness:.3f}",
         "--brightness",
         args.light_brightness,
         "--rgb",
         args.light_rgb,
     ]
-    script = " ".join(shlex.quote(str(part)) for part in remote_args)
-    try:
-        result = run_adb_shell(args, script, timeout=8.0)
-    except Exception as exc:  # noqa: BLE001 - realtime view should still start
-        print(f"Runtime setup warning: WS2812 setup failed: {exc}", file=sys.stderr)
-        return
+    ring_ok = run_runtime_setup_command(args, "WS2812", ring_args)
 
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        suffix = f": {detail}" if detail else ""
-        print(f"Runtime setup warning: WS2812 setup returned {result.returncode}{suffix}", file=sys.stderr)
-        return
+    backlight_status = "disabled"
+    if not args.no_backlight:
+        backlight_args = [
+            "python3",
+            REMOTE_WS2812_BACKLIGHT_SCRIPT,
+            "--gpio",
+            args.backlight_gpio,
+            "--chip",
+            args.backlight_gpio_chip,
+            "--line",
+            args.backlight_gpio_line,
+            "--count",
+            args.backlight_count,
+            "--brightness",
+            f"{args.light_backlight_brightness:.3f}",
+            "--helper",
+            REMOTE_WS2812_BACKLIGHT_HELPER,
+            "--rgb",
+            args.light_rgb,
+        ]
+        backlight_ok = run_runtime_setup_command(args, "WS2812 backlight", backlight_args)
+        backlight_status = (
+            f"{args.light_backlight_brightness:.2f}@{args.backlight_gpio}/{args.backlight_count}"
+            f" ({'ok' if backlight_ok else 'warning'})"
+        )
+
     print(
-        f"Runtime setup: WS2812 rgb={args.light_rgb} brightness={args.light_brightness:.2f}",
+        "Runtime setup: "
+        f"WS2812={'ok' if ring_ok else 'warning'} rgb={args.light_rgb} "
+        f"brightness={args.light_brightness:.2f}/{args.light_high_brightness:.2f}/{args.light_low_brightness:.2f}",
+        f"backlight={backlight_status}",
         file=sys.stderr,
     )
 
@@ -385,7 +522,8 @@ def write_remote_input_adjust(args: argparse.Namespace) -> None:
     if not path or args.profile == "yolo11":
         return
     text = input_adjust_config_text(args)
-    script = f"cat > {shlex.quote(path)} <<'EOF'\n{text}EOF"
+    quoted_path = shlex.quote(path)
+    script = f"rm -f {quoted_path}; umask 000; cat > {quoted_path} <<'EOF'\n{text}EOF"
     try:
         result = run_adb_shell(args, script, timeout=5.0)
     except Exception as exc:  # noqa: BLE001 - realtime view should still start from argv defaults
@@ -424,6 +562,9 @@ def build_remote_command(args: argparse.Namespace) -> str:
     if args.roi:
         stream_parts.extend(["--roi", args.roi])
     if args.profile in TWO_STAGE_PROFILES:
+        chip_model_kind = getattr(args, "chip_model_kind", None) or (
+            "obb" if args.profile == "chip-two-stage-obb-seg-imx678" else "detect"
+        )
         defect_model_kind = getattr(args, "defect_model_kind", None) or (
             "seg" if args.profile in SEG_TWO_STAGE_PROFILES else "detect"
         )
@@ -433,6 +574,8 @@ def build_remote_command(args: argparse.Namespace) -> str:
         stream_parts.extend(
             [
                 "--two-stage",
+                "--chip-model-kind",
+                chip_model_kind,
                 "--defect-model",
                 defect_model,
                 "--defect-model-kind",
@@ -486,10 +629,13 @@ def build_remote_command(args: argparse.Namespace) -> str:
     if getattr(args, "input_adjust_file", ""):
         stream_parts.extend(["--input-adjust-file", args.input_adjust_file])
     stream_command = shell_join(stream_parts)
+    quoted_remote_log = shlex.quote(args.remote_log)
     return (
         f"cd {shlex.quote(args.remote_workdir)} && "
         "export LD_LIBRARY_PATH=$PWD/lib:$LD_LIBRARY_PATH && "
-        f"exec {stream_command} 2>{shlex.quote(args.remote_log)}"
+        f"rm -f {quoted_remote_log} && "
+        f"umask 000 && "
+        f"exec {stream_command} 2>{quoted_remote_log}"
     )
 
 
@@ -567,6 +713,130 @@ def polygon_area(points: list[tuple[float, float]]) -> float:
     return abs(area) * 0.5
 
 
+def obb_angle_from_points(points: list[tuple[float, float]]) -> float | None:
+    if len(points) != 4:
+        return None
+    (x0, y0), (x1, y1) = points[0], points[1]
+    if not all(math.isfinite(value) for value in (x0, y0, x1, y1)):
+        return None
+    return math.degrees(math.atan2(y1 - y0, x1 - x0))
+
+
+def chip_obb_from_contour(
+    detection: Detection,
+    contour: list[tuple[float, float]],
+    width: int,
+    height: int,
+) -> tuple[list[tuple[float, float]] | None, float | None]:
+    if detection.class_id != 0 or len(contour) != 4:
+        return None, None
+    normalized = normalize_points(contour, width, height)
+    if len(normalized) != 4 or polygon_area(normalized) <= 1.0:
+        return None, None
+    return contour, obb_angle_from_points(normalized)
+
+
+def refine_chip_obb_box_pixels(
+    image_bgr: np.ndarray,
+    detection: Detection,
+    width: int,
+    height: int,
+) -> Detection:
+    if detection.class_id != 0:
+        return detection
+    values = [float(detection.x1), float(detection.y1), float(detection.x2), float(detection.y2)]
+    if any(not math.isfinite(value) for value in values):
+        return detection
+    x1, y1, x2, y2 = values
+    if max(abs(value) for value in values) <= 2.0:
+        x1 *= width
+        x2 *= width
+        y1 *= height
+        y2 *= height
+    left = int(max(0, min(width - 1, math.floor(min(x1, x2)))))
+    top = int(max(0, min(height - 1, math.floor(min(y1, y2)))))
+    right = int(max(0, min(width, math.ceil(max(x1, x2)))))
+    bottom = int(max(0, min(height, math.ceil(max(y1, y2)))))
+    if right - left < 12 or bottom - top < 12:
+        return detection
+
+    side = max(right - left, bottom - top)
+    margin = max(18, int(round(side * 0.22)))
+    rx1 = max(0, left - margin)
+    ry1 = max(0, top - margin)
+    rx2 = min(width, right + margin)
+    ry2 = min(height, bottom + margin)
+    roi = image_bgr[ry1:ry2, rx1:rx2]
+    if roi.size == 0:
+        return detection
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    _threshold, mask = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    contours, _hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return detection
+
+    search_area = float((rx2 - rx1) * (ry2 - ry1))
+    box_area = float((right - left) * (bottom - top))
+    best: tuple[float, np.ndarray] | None = None
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if area < max(160.0, box_area * 0.12) or area > search_area * 0.90:
+            continue
+        rect = cv2.minAreaRect(contour)
+        rect_w, rect_h = rect[1]
+        if rect_w < 20.0 or rect_h < 20.0:
+            continue
+        fill_ratio = area / max(1.0, rect_w * rect_h)
+        if fill_ratio < 0.35:
+            continue
+        rank = area * fill_ratio
+        if best is None or rank > best[0]:
+            best = (rank, cv2.boxPoints(rect).astype(np.float32))
+    if best is None:
+        return detection
+
+    points = best[1]
+    points[:, 0] = np.clip(points[:, 0] + rx1, 0.0, float(width - 1))
+    points[:, 1] = np.clip(points[:, 1] + ry1, 0.0, float(height - 1))
+    center = points.mean(axis=0)
+    angles = np.arctan2(points[:, 1] - center[1], points[:, 0] - center[0])
+    ordered = points[np.argsort(angles)]
+    start = int(np.argmin(ordered.sum(axis=1)))
+    ordered = np.roll(ordered, -start, axis=0)
+    ordered_points = [(float(x), float(y)) for x, y in ordered]
+    if polygon_area(ordered_points) <= 4.0:
+        return detection
+
+    xs = [point[0] for point in ordered_points]
+    ys = [point[1] for point in ordered_points]
+    detection.x1 = float(max(0.0, min(xs)))
+    detection.y1 = float(max(0.0, min(ys)))
+    detection.x2 = float(min(float(width - 1), max(xs)))
+    detection.y2 = float(min(float(height - 1), max(ys)))
+    detection.obb_points = ordered_points
+    detection.contour = ordered_points
+    detection.polygon = ordered_points
+    detection.obb_angle = obb_angle_from_points(ordered_points)
+    detection.area = polygon_area(ordered_points)
+    return detection
+
+
+def refine_chip_obbs_in_frame(
+    image_bgr: np.ndarray,
+    detections: list[Detection],
+    width: int,
+    height: int,
+) -> list[Detection]:
+    for detection in detections:
+        refine_chip_obb_box_pixels(image_bgr, detection, width, height)
+    return detections
+
+
 def parse_detection_contours(
     data: bytes,
     detections: list[Detection],
@@ -599,6 +869,7 @@ def parse_detection_contours(
 
         if contour:
             normalized = normalize_points(contour, width, height)
+            obb_points, obb_angle = chip_obb_from_contour(detection, contour, width, height)
             parsed.append(
                 Detection(
                     detection.class_id,
@@ -609,6 +880,8 @@ def parse_detection_contours(
                     detection.score,
                     polygon=contour,
                     contour=contour,
+                    obb_points=obb_points,
+                    obb_angle=obb_angle,
                     area=polygon_area(normalized),
                 )
             )
@@ -617,6 +890,49 @@ def parse_detection_contours(
 
     if offset != len(data):
         raise ProtocolError(f"contour block has {len(data) - offset} trailing bytes")
+    return parsed
+
+
+def parse_detection_obbs(
+    data: bytes,
+    detections: list[Detection],
+    width: int,
+    height: int,
+) -> list[Detection]:
+    """Attach optional per-detection OBB sidecar records.
+
+    Block layout is one record per detection: float32 x0,y0,x1,y1,x2,y2,x3,y3,angle.
+    Coordinates may be pixels or normalized 0..1. Non-finite or degenerate
+    records are ignored so old bbox/contour drawing remains usable.
+    """
+    expected = len(detections) * OBB_STRUCT.size
+    if len(data) != expected:
+        raise ProtocolError(f"OBB block size mismatch: expected {expected} bytes, got {len(data)}")
+
+    parsed: list[Detection] = []
+    for index, detection in enumerate(detections):
+        values = OBB_STRUCT.unpack_from(data, index * OBB_STRUCT.size)
+        raw_points = [(values[i], values[i + 1]) for i in range(0, 8, 2)]
+        angle = values[8]
+        normalized = normalize_points(raw_points, width, height)
+        if len(normalized) == 4 and polygon_area(normalized) > 1.0:
+            parsed.append(
+                Detection(
+                    detection.class_id,
+                    detection.x1,
+                    detection.y1,
+                    detection.x2,
+                    detection.y2,
+                    detection.score,
+                    polygon=detection.polygon,
+                    contour=detection.contour,
+                    obb_points=raw_points,
+                    obb_angle=angle if math.isfinite(angle) else obb_angle_from_points(normalized),
+                    area=detection.area,
+                )
+            )
+        else:
+            parsed.append(detection)
     return parsed
 
 
@@ -639,6 +955,7 @@ def read_stream_frame(stream: BinaryIO, remote_log: str) -> StreamFrame | None:
     if width <= 0 or height <= 0 or width % 2 != 0 or height % 2 != 0:
         raise ProtocolError(f"invalid NV12 frame size from stream: {width}x{height}")
     has_contours = bool(raw_det_count & DETECTION_CONTOURS_FLAG)
+    has_obbs = bool(raw_det_count & DETECTION_OBB_FLAG)
     det_count = raw_det_count & DETECTION_COUNT_MASK
     if det_count > MAX_DETECTIONS:
         raise ProtocolError(f"invalid detection count: {det_count} > {MAX_DETECTIONS}")
@@ -673,6 +990,18 @@ def read_stream_frame(stream: BinaryIO, remote_log: str) -> StreamFrame | None:
         if len(contour_bytes) != contour_block_size:
             raise ProtocolError(f"short contour block: expected {contour_block_size} bytes, got {len(contour_bytes)}")
         detections = parse_detection_contours(contour_bytes, detections, width, height)
+
+    if has_obbs:
+        obb_size_bytes = read_exact(stream, CONTOUR_BLOCK_SIZE_STRUCT.size)
+        if len(obb_size_bytes) != CONTOUR_BLOCK_SIZE_STRUCT.size:
+            raise ProtocolError("short OBB block size")
+        (obb_block_size,) = CONTOUR_BLOCK_SIZE_STRUCT.unpack(obb_size_bytes)
+        if obb_block_size > MAX_PAYLOAD_BYTES:
+            raise ProtocolError(f"OBB block too large: {obb_block_size} bytes")
+        obb_bytes = read_exact(stream, obb_block_size)
+        if len(obb_bytes) != obb_block_size:
+            raise ProtocolError(f"short OBB block: expected {obb_block_size} bytes, got {len(obb_bytes)}")
+        detections = parse_detection_obbs(obb_bytes, detections, width, height)
 
     payload = read_exact(stream, payload_size)
     if len(payload) != payload_size:
@@ -732,6 +1061,10 @@ def detection_points(detection: Detection) -> list[tuple[float, float]] | None:
     return detection.contour or detection.polygon
 
 
+def detection_obb_points(detection: Detection) -> list[tuple[float, float]] | None:
+    return detection.obb_points
+
+
 def normalize_points(points: list[tuple[float, float]], width: int, height: int) -> list[tuple[float, float]]:
     finite = [(float(x), float(y)) for x, y in points if math.isfinite(float(x)) and math.isfinite(float(y))]
     if not finite:
@@ -787,6 +1120,8 @@ def normalized_box(detection: Detection, width: int, height: int) -> Detection |
         detection.score,
         polygon=contour,
         contour=contour,
+        obb_points=normalize_points(detection.obb_points, width, height) if detection.obb_points else None,
+        obb_angle=detection.obb_angle,
         area=area,
     )
 
@@ -841,7 +1176,7 @@ class DetectionSmoother:
 
     @staticmethod
     def _track_detection(track: DetectionTrack) -> Detection:
-        return Detection(track.class_id, track.x1, track.y1, track.x2, track.y2, track.score)
+        return track.as_detection()
 
     def _match_score(self, track: DetectionTrack, detection: Detection) -> float | None:
         if track.class_id != detection.class_id:
@@ -885,18 +1220,28 @@ class DetectionSmoother:
                         detection.x2,
                         detection.y2,
                         detection.score,
+                        polygon=detection.polygon,
+                        contour=detection.contour,
+                        obb_points=detection.obb_points,
+                        obb_angle=detection.obb_angle,
+                        area=detection.area,
                     )
                 )
                 updated_tracks.add(len(self.tracks) - 1)
                 continue
 
             track = self.tracks[best_index]
-            a = self.alpha
+            a = 1.0 if detection.class_id == 0 else self.alpha
             track.x1 = track.x1 * (1.0 - a) + detection.x1 * a
             track.y1 = track.y1 * (1.0 - a) + detection.y1 * a
             track.x2 = track.x2 * (1.0 - a) + detection.x2 * a
             track.y2 = track.y2 * (1.0 - a) + detection.y2 * a
             track.score = track.score * (1.0 - a) + detection.score * a
+            track.polygon = detection.polygon
+            track.contour = detection.contour
+            track.obb_points = detection.obb_points
+            track.obb_angle = detection.obb_angle
+            track.area = detection.area
             track.hits += 1
             track.missed = 0
             unmatched_tracks.remove(best_index)
@@ -997,17 +1342,132 @@ def put_label(
     )
 
 
-def draw_detection_masks(image: np.ndarray, detections: list[Detection], alpha: float = 0.28) -> None:
-    if np is None:
+def _segment_orientation(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+) -> float:
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _segments_intersect(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+    d: tuple[float, float],
+) -> bool:
+    eps = 1e-6
+    ab_c = _segment_orientation(a, b, c)
+    ab_d = _segment_orientation(a, b, d)
+    cd_a = _segment_orientation(c, d, a)
+    cd_b = _segment_orientation(c, d, b)
+    return (ab_c * ab_d < -eps) and (cd_a * cd_b < -eps)
+
+
+def contour_geometry_reliable(detection: Detection, contour: list[tuple[float, float]]) -> bool:
+    if len(contour) < 3:
+        return False
+
+    box_w = max(0.0, detection.x2 - detection.x1)
+    box_h = max(0.0, detection.y2 - detection.y1)
+    box_area = box_w * box_h
+    if box_area <= 1.0:
+        return False
+
+    area = polygon_area(contour)
+    if area <= 1.0:
+        return False
+    area_ratio = area / box_area
+    if area_ratio > 0.82:
+        return False
+
+    closed = contour + [contour[0]]
+    lengths = [
+        math.hypot(closed[i + 1][0] - closed[i][0], closed[i + 1][1] - closed[i][1])
+        for i in range(len(contour))
+    ]
+    perimeter = sum(lengths)
+    max_edge = max(lengths) if lengths else 0.0
+    diagonal = math.hypot(box_w, box_h)
+    if max_edge > max(35.0, diagonal * 0.60):
+        return False
+    if perimeter > 0 and max_edge > perimeter * 0.35:
+        return False
+
+    edge_count = len(contour)
+    for i in range(edge_count):
+        a = contour[i]
+        b = contour[(i + 1) % edge_count]
+        for j in range(i + 1, edge_count):
+            if j == i or j == (i + 1) % edge_count or (i == 0 and j == edge_count - 1):
+                continue
+            c = contour[j]
+            d = contour[(j + 1) % edge_count]
+            if _segments_intersect(a, b, c, d):
+                return False
+    return True
+
+
+def should_fill_mask(args: argparse.Namespace, detection: Detection, contour: list[tuple[float, float]]) -> bool:
+    if args.mask_fill == "always":
+        return True
+    if args.mask_fill == "outline":
+        return False
+    return contour_geometry_reliable(detection, contour)
+
+
+def overlay_draws_mask(overlay_mode: str) -> bool:
+    return overlay_mode in ("all", "mask", "mask-contour")
+
+
+def overlay_draws_contour(overlay_mode: str) -> bool:
+    return overlay_mode in ("all", "contour", "mask-contour")
+
+
+def overlay_draws_boxes(overlay_mode: str) -> bool:
+    return overlay_mode in ("all", "boxes")
+
+
+def overlay_draws_labels(overlay_mode: str) -> bool:
+    return overlay_mode in OVERLAY_MODES
+
+
+def detection_has_visible_overlay(detection: Detection, overlay_mode: str, args: argparse.Namespace) -> bool:
+    if bool(getattr(args, "chip_box_overlay", False)) and detection.class_id == 0 and detection_obb_points(detection):
+        return True
+    if overlay_draws_boxes(overlay_mode):
+        return True
+    points = detection_points(detection)
+    if not points:
+        return False
+    if overlay_draws_contour(overlay_mode) and len(points) >= 2:
+        return True
+    if not overlay_draws_mask(overlay_mode):
+        return False
+    return len(points) >= 3 and should_fill_mask(args, detection, points)
+
+
+def draw_detection_masks(
+    image: np.ndarray,
+    detections: list[Detection],
+    args: argparse.Namespace,
+    overlay_mode: str,
+    alpha: float = 0.28,
+) -> None:
+    if np is None or not overlay_draws_mask(overlay_mode):
         return
     overlay = image.copy()
     any_mask = False
     for detection in detections:
+        if detection.class_id == 0 and detection_obb_points(detection):
+            continue
         points = detection_points(detection)
         if not points:
             continue
         contour = normalize_points(points, image.shape[1], image.shape[0])
         if len(contour) < 3:
+            continue
+        if not should_fill_mask(args, detection, contour):
             continue
         pts = np.array([[int(round(x)), int(round(y))] for x, y in contour], dtype=np.int32)
         color = class_color(detection.class_id)
@@ -1017,14 +1477,25 @@ def draw_detection_masks(image: np.ndarray, detections: list[Detection], alpha: 
         cv2.addWeighted(overlay, alpha, image, 1.0 - alpha, 0, dst=image)
 
 
-def draw_detections(image: np.ndarray, detections: list[Detection], class_names: list[str]) -> int:
+def draw_detections(
+    image: np.ndarray,
+    detections: list[Detection],
+    class_names: list[str],
+    args: argparse.Namespace | None = None,
+    overlay_mode: str | None = None,
+) -> int:
+    args = args or argparse.Namespace(mask_fill="auto", overlay_mode="all")
+    if not hasattr(args, "mask_fill"):
+        args.mask_fill = "auto"
+    overlay_mode = overlay_mode or getattr(args, "overlay_mode", "all")
+    chip_box_overlay = bool(getattr(args, "chip_box_overlay", False))
     height, width = image.shape[:2]
     normalized_detections = [
         detection
         for detection in (normalized_box(raw_detection, width, height) for raw_detection in detections)
         if detection is not None
     ]
-    draw_detection_masks(image, normalized_detections)
+    draw_detection_masks(image, normalized_detections, args, overlay_mode)
     drawn = 0
     for detection in normalized_detections:
         color = class_color(detection.class_id)
@@ -1036,15 +1507,31 @@ def draw_detections(image: np.ndarray, detections: list[Detection], class_names:
         score_text = f"{score:.2f}" if score <= 1.0 else f"{score:.1f}"
         label = f"{class_name(detection.class_id, class_names)} {score_text}"
 
-        cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+        chip_obb = detection_obb_points(detection) if detection.class_id == 0 else None
+        draw_box = overlay_draws_boxes(overlay_mode) or (chip_box_overlay and detection.class_id == 0)
+        if draw_box and chip_obb:
+            obb = normalize_points(chip_obb, width, height)
+            if len(obb) == 4:
+                pts = np.array([[int(round(x)), int(round(y))] for x, y in obb], dtype=np.int32)
+                cv2.polylines(image, [pts], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
+            else:
+                cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+        elif draw_box:
+            cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
         points = detection_points(detection)
-        if points:
+        if points and overlay_draws_contour(overlay_mode):
             contour = normalize_points(points, width, height)
             if len(contour) >= 2:
                 pts = np.array([[int(round(x)), int(round(y))] for x, y in contour], dtype=np.int32)
-                cv2.polylines(image, [pts], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
-        put_label(image, label, x1, y1, color)
-        drawn += 1
+                is_closed = args.mask_fill == "always" or contour_geometry_reliable(detection, contour)
+                cv2.polylines(image, [pts], isClosed=is_closed, color=color, thickness=2, lineType=cv2.LINE_AA)
+        visible = detection_has_visible_overlay(detection, overlay_mode, args)
+        if chip_box_overlay and detection.class_id == 0:
+            visible = True
+        if visible and overlay_draws_labels(overlay_mode):
+            put_label(image, label, x1, y1, color)
+        if visible:
+            drawn += 1
     return drawn
 
 
@@ -1097,6 +1584,13 @@ def threshold_float(value: str) -> float:
     parsed = float(value)
     if not 0.0 < parsed < 1.0:
         raise argparse.ArgumentTypeError("must be between 0 and 1")
+    return parsed
+
+
+def smoothing_alpha_float(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 < parsed <= 1.0:
+        raise argparse.ArgumentTypeError("must be > 0 and <= 1")
     return parsed
 
 
@@ -1181,6 +1675,14 @@ def profile_defaults(profile: str) -> tuple[str, str, str, list[str], str]:
             CHIP_TWO_STAGE_CLASSES,
             "RKNN Chip Two-Stage Seg IMX678 UVC Live",
         )
+    if profile == "chip-two-stage-obb-seg-imx678":
+        return (
+            CHIP_REMOTE_WORKDIR,
+            CHIP_TWO_STAGE_MAIXCAM_REMOTE_BINARY,
+            CHIP_ROI_OBB_REMOTE_MODEL,
+            CHIP_TWO_STAGE_CLASSES,
+            "RKNN Chip Two-Stage OBB Seg IMX678 UVC Live",
+        )
     return (
         CHIP_REMOTE_WORKDIR,
         CHIP_REMOTE_BINARY,
@@ -1220,6 +1722,7 @@ def parse_args() -> argparse.Namespace:
             "chip-two-stage-imx678",
             "chip-two-stage-seg-maixcam",
             "chip-two-stage-seg-imx678",
+            "chip-two-stage-obb-seg-imx678",
             "yolo11",
         ),
         default=DEFAULT_PROFILE,
@@ -1234,6 +1737,11 @@ def parse_args() -> argparse.Namespace:
         choices=("detect", "seg"),
         help="Board defect postprocess kind for two-stage streams",
     )
+    parser.add_argument(
+        "--chip-model-kind",
+        choices=("detect", "obb"),
+        help="Board chip ROI postprocess kind for two-stage streams",
+    )
     parser.add_argument("--labels", type=Path, help="Local label file for drawing class names")
     parser.add_argument("--width", type=positive_int, default=DEFAULT_WIDTH, help="Board camera stream width")
     parser.add_argument("--height", type=positive_int, default=DEFAULT_HEIGHT, help="Board camera stream height")
@@ -1247,13 +1755,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chip-conf", type=threshold_float, default=0.25, help="Board chip ROI confidence threshold for two-stage streams")
     parser.add_argument("--defect-conf", type=threshold_float, help="Board defect confidence threshold for two-stage streams; defaults to --conf")
     parser.add_argument("--roi-margin", type=threshold_float, default=0.08, help="Chip ROI expansion ratio for two-stage streams")
-    parser.add_argument("--roi-smooth-alpha", type=threshold_float, default=0.35, help="Board-side chip ROI EMA alpha for two-stage streams")
+    parser.add_argument("--roi-smooth-alpha", type=smoothing_alpha_float, default=0.35, help="Board-side chip ROI EMA alpha for two-stage streams")
     parser.add_argument("--roi-hold", type=nonnegative_int, default=3, help="Board-side frames to hold the last chip ROI if one frame misses")
     parser.add_argument("--chip-interval", type=positive_int, default=3, help="Board-side chip ROI inference interval for two-stage streams")
     parser.add_argument("--defect-interval", type=positive_int, default=2, help="Board-side defect inference interval for two-stage streams")
     parser.add_argument("--defect-confirm", type=positive_int, default=3, help="Board-side matched defect updates required before output")
     parser.add_argument("--defect-hold", type=nonnegative_int, default=3, help="Board-side defect updates to hold after a miss")
-    parser.add_argument("--defect-smooth-alpha", type=threshold_float, default=0.35, help="Board-side defect box EMA alpha")
+    parser.add_argument("--defect-smooth-alpha", type=smoothing_alpha_float, default=0.35, help="Board-side defect box EMA alpha")
     parser.add_argument("--defect-match-iou", type=threshold_float, default=0.10, help="Board-side defect track IoU match gate")
     parser.add_argument("--defect-match-center", type=threshold_float, default=0.55, help="Board-side defect track center-distance gate in box-size units")
     parser.add_argument("--defect-class-decay", type=threshold_float, default=0.85, help="Board-side defect class vote decay")
@@ -1261,11 +1769,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--smooth-boxes", dest="smooth_boxes", action="store_true", help="Smooth displayed boxes with a short temporal tracker")
     parser.add_argument("--no-smooth-boxes", dest="smooth_boxes", action="store_false", help="Draw raw per-frame detection boxes")
     parser.set_defaults(smooth_boxes=None)
-    parser.add_argument("--smooth-alpha", type=threshold_float, default=0.35, help="PC-side display smoothing alpha")
-    parser.add_argument("--smooth-hold", type=nonnegative_int, default=2, help="PC-side frames to keep unmatched displayed boxes")
+    parser.add_argument("--smooth-alpha", type=smoothing_alpha_float, default=0.35, help="PC-side display smoothing alpha")
+    parser.add_argument(
+        "--smooth-hold",
+        type=nonnegative_int,
+        help="PC-side frames to keep unmatched displayed boxes; default is 0 for seg profiles, otherwise 2",
+    )
     parser.add_argument("--smooth-iou", type=float, default=0.12, help="PC-side IoU match threshold for display smoothing")
     parser.add_argument("--smooth-center", type=float, default=0.45, help="PC-side center-distance match threshold in box-size units")
-    parser.add_argument("--smooth-min-hits", type=positive_int, default=2, help="PC-side track hits before a smoothed defect box is drawn")
+    parser.add_argument(
+        "--smooth-min-hits",
+        type=positive_int,
+        help="PC-side track hits before a smoothed defect box is drawn; default is 3 for seg profiles, otherwise 2",
+    )
     parser.add_argument(
         "--display-max-defects",
         type=nonnegative_int,
@@ -1274,6 +1790,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--display-nms", type=float, default=0.30, help="Class-agnostic display NMS IoU for chip-two-stage view")
     parser.add_argument("--no-display-filter", action="store_true", help="Do not cap/NMS boxes for chip-two-stage display")
+    parser.add_argument(
+        "--mask-fill",
+        choices=("auto", "always", "outline"),
+        default="auto",
+        help="Segmentation contour fill policy; auto skips unreliable lossy contours",
+    )
+    parser.add_argument(
+        "--overlay-mode",
+        choices=OVERLAY_MODES,
+        help="Detection overlay mode; seg two-stage defaults to mask-contour, other profiles default to all",
+    )
     parser.add_argument("--headless", action="store_true", help="Do not open an OpenCV window")
     parser.add_argument("--save-snapshot", type=Path, help="Save the last annotated frame")
     parser.add_argument("--save-clean-snapshot", type=Path, help="Save the last decoded camera frame before overlays")
@@ -1282,8 +1809,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-runtime-setup", action="store_true", help="Do not set WS2812 defaults before chip realtime streams")
     parser.add_argument("--light-rgb", default=DEFAULT_LIGHT_RGB, help="WS2812 RGB set before chip realtime streams")
     parser.add_argument("--light-brightness", type=float, default=DEFAULT_LIGHT_BRIGHTNESS, help="WS2812 brightness set before chip realtime streams")
+    parser.add_argument("--light-high-brightness", type=float, default=DEFAULT_LIGHT_HIGH_BRIGHTNESS, help="WS2812 high-angle 12 LED brightness")
+    parser.add_argument("--light-low-brightness", type=float, default=DEFAULT_LIGHT_LOW_BRIGHTNESS, help="WS2812 low-angle 24 LED brightness")
+    parser.add_argument("--light-backlight-brightness", type=float, default=DEFAULT_LIGHT_BACKLIGHT_BRIGHTNESS, help="WS2812 backlight brightness set before chip realtime streams")
     parser.add_argument("--light-count", type=positive_int, default=DEFAULT_LIGHT_COUNT, help="WS2812 LED count")
+    parser.add_argument("--light-segment-counts", default=DEFAULT_LIGHT_SEGMENT_COUNTS, help="WS2812 cascaded segment counts")
     parser.add_argument("--light-device", default=DEFAULT_LIGHT_DEVICE, help="Board spidev node for WS2812")
+    parser.add_argument("--backlight-gpio", default=DEFAULT_BACKLIGHT_GPIO, help="Backlight GPIO name")
+    parser.add_argument("--backlight-gpio-chip", default=DEFAULT_BACKLIGHT_GPIO_CHIP, help="Backlight GPIO chip label")
+    parser.add_argument("--backlight-gpio-line", type=int, default=DEFAULT_BACKLIGHT_GPIO_LINE, help="Backlight GPIO line inside the bank")
+    parser.add_argument("--backlight-count", type=positive_int, default=DEFAULT_BACKLIGHT_COUNT, help="Backlight WS2812 LED count")
+    parser.add_argument("--no-backlight", action="store_true", help="Do not set the independent backlight channel")
     parser.add_argument("--input-adjust", dest="input_adjust", action="store_true", help="Apply board-side RGB adjustments before NPU and display stream")
     parser.add_argument("--no-input-adjust", dest="input_adjust", action="store_false", help="Do not apply board-side RGB adjustments before NPU")
     parser.set_defaults(input_adjust=None)
@@ -1312,11 +1848,15 @@ def parse_args() -> argparse.Namespace:
         args.remote_defect_model = CHIP_DEFECT_SEG_REMOTE_MODEL if args.defect_model_kind == "seg" else CHIP_REMOTE_MODEL
     args.default_class_names = default_labels
     args.window_name = args.window_name or default_window
+    if args.overlay_mode is None:
+        args.overlay_mode = "mask-contour" if args.profile in SEG_TWO_STAGE_PROFILES else "all"
+    args.chip_box_overlay = args.profile in TWO_STAGE_PROFILES
     if args.smooth_boxes is None:
-        args.smooth_boxes = args.profile in TWO_STAGE_PROFILES and args.defect_model_kind != "seg"
-    if args.defect_model_kind == "seg" and args.smooth_boxes:
-        print("seg defect model disables --smooth-boxes so contour masks are preserved", file=sys.stderr)
-        args.smooth_boxes = False
+        args.smooth_boxes = args.profile in TWO_STAGE_PROFILES
+    if args.smooth_hold is None:
+        args.smooth_hold = 0 if args.profile in SEG_TWO_STAGE_PROFILES else 2
+    if args.smooth_min_hits is None:
+        args.smooth_min_hits = 3 if args.profile in SEG_TWO_STAGE_PROFILES else 2
     if args.defect_conf is None:
         args.defect_conf = DEFAULT_TWO_STAGE_DEFECT_CONF if args.profile in TWO_STAGE_PROFILES else args.conf
     if args.input_adjust is None:
@@ -1340,10 +1880,32 @@ def parse_args() -> argparse.Namespace:
         if args.camera_format is None:
             args.camera_format = "mjpg"
 
+    if args.profile == "chip-two-stage-obb-seg-imx678":
+        if abs(float(args.chip_conf) - 0.25) < 1e-6:
+            args.chip_conf = OBB_BALANCED_CHIP_CONF
+        if abs(float(args.roi_smooth_alpha) - 0.35) < 1e-6:
+            args.roi_smooth_alpha = OBB_BALANCED_ROI_SMOOTH_ALPHA
+        if int(args.roi_hold) == 3:
+            args.roi_hold = OBB_BALANCED_ROI_HOLD
+        if int(args.chip_interval) == 3:
+            args.chip_interval = OBB_BALANCED_CHIP_INTERVAL
+
     if args.width % 2 != 0 or args.height % 2 != 0:
         parser.error("NV12 width and height must be even")
     if not 0.0 <= args.light_brightness <= 1.0:
         parser.error("--light-brightness must be between 0.0 and 1.0")
+    if not 0.0 <= args.light_high_brightness <= 1.0:
+        parser.error("--light-high-brightness must be between 0.0 and 1.0")
+    if not 0.0 <= args.light_low_brightness <= 1.0:
+        parser.error("--light-low-brightness must be between 0.0 and 1.0")
+    if not 0.0 <= args.light_backlight_brightness <= 1.0:
+        parser.error("--light-backlight-brightness must be between 0.0 and 1.0")
+    if not 0 <= args.backlight_gpio_line <= 31:
+        parser.error("--backlight-gpio-line must be between 0 and 31")
+    if not args.backlight_gpio:
+        parser.error("--backlight-gpio must not be empty")
+    if not args.backlight_gpio_chip:
+        parser.error("--backlight-gpio-chip must not be empty")
     return args
 
 
@@ -1395,6 +1957,9 @@ def main() -> int:
     )
 
     try:
+        if not check_remote_runtime_files(args):
+            return 2
+
         maybe_setup_ws2812(args)
         write_remote_input_adjust(args)
         process = start_adb_stream(args)
@@ -1414,6 +1979,8 @@ def main() -> int:
             fps = fps_meter.tick()
             focus = focus_score(clean_frame)
             raw_count = len(frame_info.detections)
+            if args.profile == "chip-two-stage-obb-seg-imx678":
+                refine_chip_obbs_in_frame(clean_frame, frame_info.detections, frame_info.width, frame_info.height)
             frame = clean_frame.copy() if args.input_adjust else apply_preview_adjustments(clean_frame, args)
             display_detections = (
                 smoother.update(frame_info.detections, frame_info.width, frame_info.height)
@@ -1426,7 +1993,7 @@ def main() -> int:
                 frame_info.height,
                 args,
             )
-            drawn_count = draw_detections(frame, display_detections, class_names)
+            drawn_count = draw_detections(frame, display_detections, class_names, args)
             draw_status(frame, fps, frame_info, raw_count, drawn_count, focus)
             last_frame = frame
             frames_seen += 1

@@ -24,7 +24,8 @@ SPI_IOC_WR_MAX_SPEED_HZ = 0x40046B04
 
 DEFAULT_DEVICE = "/dev/spidev1.0"
 DEFAULT_SPEED_HZ = 2_400_000
-DEFAULT_COUNT = 8
+DEFAULT_COUNT = 44
+DEFAULT_SEGMENT_COUNTS = (8, 12, 24)
 
 
 def parse_rgb(text: str) -> tuple[int, int, int]:
@@ -38,6 +39,33 @@ def parse_rgb(text: str) -> tuple[int, int, int]:
     if any(value < 0 or value > 255 for value in values):
         raise argparse.ArgumentTypeError("RGB values must be in 0..255")
     return values  # type: ignore[return-value]
+
+
+def parse_rgb_list(text: str) -> tuple[tuple[int, int, int], ...]:
+    values = tuple(parse_rgb(part.strip()) for part in text.split(";") if part.strip())
+    if not values:
+        raise argparse.ArgumentTypeError("expected semicolon-separated RGB values")
+    return values
+
+
+def parse_int_list(text: str) -> tuple[int, ...]:
+    try:
+        values = tuple(int(part.strip()) for part in text.replace(";", ",").split(",") if part.strip())
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected comma-separated integers") from exc
+    if not values or any(value <= 0 for value in values):
+        raise argparse.ArgumentTypeError("segment counts must be positive")
+    return values
+
+
+def parse_float_list(text: str) -> tuple[float, ...]:
+    try:
+        values = tuple(float(part.strip()) for part in text.replace(";", ",").split(",") if part.strip())
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected comma-separated floats") from exc
+    if not values or any(value < 0.0 or value > 1.0 for value in values):
+        raise argparse.ArgumentTypeError("segment brightness values must be in 0.0..1.0")
+    return values
 
 
 def clamp_u8(value: float) -> int:
@@ -103,6 +131,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default=DEFAULT_DEVICE, help="Linux spidev node")
     parser.add_argument("--speed", type=int, default=DEFAULT_SPEED_HZ, help="SPI speed in Hz")
     parser.add_argument("--count", type=int, default=DEFAULT_COUNT, help="WS2812 LED count")
+    parser.add_argument(
+        "--segment-counts",
+        type=parse_int_list,
+        default=None,
+        help="Comma-separated cascaded segment counts, for example 8,12,24",
+    )
+    parser.add_argument(
+        "--segment-brightness",
+        type=parse_float_list,
+        default=None,
+        help="Comma-separated per-segment brightness values, for example 0.50,0.20,0.20",
+    )
+    parser.add_argument(
+        "--segment-rgb",
+        type=parse_rgb_list,
+        default=None,
+        help="Semicolon-separated per-segment RGB values, for example 190,255,100;190,255,100;190,255,100",
+    )
     parser.add_argument("--rgb", type=parse_rgb, default=(255, 255, 255), help="RGB color, for example 80,80,80")
     parser.add_argument("--brightness", type=float, default=0.25, help="Brightness multiplier, 0.0..1.0")
     parser.add_argument("--off", action="store_true", help="Turn all LEDs off")
@@ -119,6 +165,28 @@ def main() -> int:
         raise SystemExit("--brightness must be in 0.0..1.0")
     if not Path(args.device).exists():
         raise SystemExit(f"{args.device} does not exist; install the SPI overlay and reboot first")
+
+    if args.segment_counts is not None:
+        segment_counts = args.segment_counts
+        segment_brightness = args.segment_brightness or tuple(args.brightness for _ in segment_counts)
+        if len(segment_brightness) != len(segment_counts):
+            raise SystemExit("--segment-brightness length must match --segment-counts")
+        segment_rgb = args.segment_rgb or tuple(args.rgb for _ in segment_counts)
+        if len(segment_rgb) != len(segment_counts):
+            raise SystemExit("--segment-rgb length must match --segment-counts")
+        pixels: list[tuple[int, int, int]] = []
+        for count, brightness, base_rgb in zip(segment_counts, segment_brightness, segment_rgb):
+            rgb = (0, 0, 0) if args.off else scale_rgb(base_rgb, brightness)
+            pixels.extend([rgb] * count)
+        show(args.device, args.speed, pixels)
+        print(
+            "ws2812 "
+            f"count={len(pixels)} segments={','.join(str(value) for value in segment_counts)} "
+            f"brightness={','.join(f'{value:.3f}' for value in segment_brightness)} "
+            f"rgb={';'.join(','.join(str(channel) for channel in value) for value in segment_rgb) if not args.off else (0, 0, 0)} "
+            f"device={args.device} speed={args.speed}"
+        )
+        return 0
 
     rgb = (0, 0, 0) if args.off else scale_rgb(args.rgb, args.brightness)
     show(args.device, args.speed, [rgb] * args.count)
